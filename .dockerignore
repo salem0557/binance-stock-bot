@@ -1,0 +1,8 @@
+.git
+**/__pycache__
+*.pyc
+**/.env
+**/state.json
+**/trades.csv
+**/models
+docs

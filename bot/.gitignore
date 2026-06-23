@@ -1,0 +1,12 @@
+# Secrets — never commit your API keys
+.env
+
+# Bot runtime state / artifacts
+state.json
+trades.csv
+models/
+data/
+
+# Python
+__pycache__/
+*.pyc
