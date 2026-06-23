@@ -1,0 +1,19 @@
+# Run the bot 24/7 with:  docker compose -f bot/docker-compose.yml up -d --build
+# Logs:                   docker compose -f bot/docker-compose.yml logs -f
+# Stop:                   docker compose -f bot/docker-compose.yml down
+# Dashboard:              http://<server-ip>:8000
+services:
+  stockbot:
+    build: .
+    container_name: stockbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=8000          # built-in web monitor (dashboard + live logs)
+      - DATA_DIR=/data     # persistent state/models/trades
+    ports:
+      - "8000:8000"
+    volumes:
+      # Keep state, trade log and trained models across restarts/redeploys.
+      - ./data:/data

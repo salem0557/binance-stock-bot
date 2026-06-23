@@ -1,0 +1,6 @@
+# Generated dashboard snapshot (written at runtime)
+docs/stocks/data/bot.json
+
+# Python
+__pycache__/
+*.pyc

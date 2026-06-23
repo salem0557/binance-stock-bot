@@ -1,0 +1,9 @@
+# Core (needed for testnet/live order execution)
+python-binance>=1.0.19
+
+# Self-learning ML confirmation model (optional but recommended).
+# The bot runs fine without these — it just trades on the technical signal
+# alone and skips the ML filter.
+scikit-learn>=1.3
+numpy>=1.24
+joblib>=1.3
