@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import time
 import urllib.parse
 import urllib.request
@@ -31,7 +32,12 @@ try:  # Python 3.9+ standard library
 except Exception:  # pragma: no cover
     _ET = None
 
+# Data sources (free, no API key). Stooq is tried first; if it's blocked from
+# the deploy region (some hosts can't reach it), Yahoo Finance is the fallback.
 _STOOQ = "https://stooq.com/q/d/l/?s={sym}&i=d"
+_YAHOO = ("https://query1.finance.yahoo.com/v8/finance/chart/"
+          "{sym}?interval=1d&range={rng}")
+_UA = {"User-Agent": "Mozilla/5.0 stockbot/1.0"}
 _cache = {}   # key -> (fetched_at, value)
 
 # NYSE/Nasdaq full-day market holidays (extend yearly). On these dates the US
@@ -48,32 +54,49 @@ _HOLIDAYS = {
 }
 
 
-def _stooq_closes(sym, ttl=3600):
-    """Daily close series for a Stooq symbol (oldest first), cached.
+def _http(url, timeout=20):
+    req = urllib.request.Request(url, headers=_UA)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
 
-    Returns the most recent good series on any failure (stale-but-usable), or an
-    empty list if it has never been fetched."""
-    key = ("closes", sym)
+
+def _stooq_closes(sym):
+    """Daily closes (oldest first) from Stooq, or [] on any failure."""
+    try:
+        text = _http(_STOOQ.format(sym=urllib.parse.quote(sym, safe="")))
+    except Exception:
+        return []
+    out = []
+    for row in csv.reader(io.StringIO(text)):
+        if not row or row[0] == "Date":
+            continue
+        try:
+            out.append(float(row[4]))   # Date,Open,High,Low,Close,Volume
+        except (IndexError, ValueError):
+            continue
+    return out
+
+
+def _yahoo_closes(sym, rng="2y"):
+    """Daily closes (oldest first) from Yahoo Finance, or [] on any failure."""
+    try:
+        text = _http(_YAHOO.format(sym=urllib.parse.quote(sym, safe=""), rng=rng))
+        res = json.loads(text)["chart"]["result"][0]
+        closes = res["indicators"]["quote"][0]["close"]
+        return [float(c) for c in closes if c is not None]
+    except Exception:
+        return []
+
+
+def _series(name, stooq_sym, yahoo_sym, ttl=3600):
+    """Daily close series, cached. Tries Stooq, then Yahoo; serves the last good
+    series (stale-but-usable) if both fail this time."""
+    key = ("series", name)
     hit = _cache.get(key)
     now = time.time()
     if hit and (now - hit[0]) < ttl:
         return hit[1]
-    closes = []
-    try:
-        url = _STOOQ.format(sym=urllib.parse.quote(sym, safe=""))
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "Mozilla/5.0 stockbot/1.0"})
-        with urllib.request.urlopen(req, timeout=20) as r:
-            text = r.read().decode("utf-8", "replace")
-        for row in csv.reader(io.StringIO(text)):
-            if not row or row[0] == "Date":
-                continue
-            try:
-                closes.append(float(row[4]))   # Date,Open,High,Low,Close,Volume
-            except (IndexError, ValueError):
-                continue
-    except Exception:
-        closes = []
+    closes = _stooq_closes(stooq_sym) or _yahoo_closes(yahoo_sym)
     if closes:
         _cache[key] = (now, closes)
         return closes
@@ -81,13 +104,13 @@ def _stooq_closes(sym, ttl=3600):
 
 
 def sp500_daily_closes():
-    """S&P 500 daily closes (via the SPY ETF on Stooq)."""
-    return _stooq_closes("spy.us")
+    """S&P 500 daily closes (SPY on Stooq, falling back to Yahoo)."""
+    return _series("sp500", "spy.us", "SPY")
 
 
 def vix_level():
-    """Latest CBOE Volatility Index (^VIX) value, or None."""
-    closes = _stooq_closes("^vix", ttl=1800)
+    """Latest CBOE Volatility Index value (^VIX), or None."""
+    closes = _series("vix", "^vix", "^VIX", ttl=1800)
     return closes[-1] if closes else None
 
 
