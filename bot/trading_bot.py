@@ -49,6 +49,7 @@ import ml_model
 import best_practices
 import smart_money
 import derivatives
+import finnhub_data
 import market
 import publish
 import monitor
@@ -224,6 +225,14 @@ class Bot:
         # regular trading hours. Off = DERIVATIVES_GATE=false.
         self.deriv_gate = (cfg("DERIVATIVES_GATE", "true") or "").lower() \
             in ("1", "true", "yes", "on")
+        # Finnhub gate (FREE alt-data, only active when FINNHUB_API_KEY is set):
+        # veto a buy when analysts are net bearish on the underlying stock, or
+        # when it reports earnings within EARNINGS_BLOCK_DAYS (gap risk).
+        self.finnhub_gate = (cfg("FINNHUB_GATE", "true") or "").lower() \
+            in ("1", "true", "yes", "on")
+        # Min analyst bullishness 0..1 = (strongBuy+buy)/all ratings.
+        self.analyst_min = float(cfg("ANALYST_MIN", "0.3") or 0.3)
+        self.earnings_block_days = int(cfg("EARNINGS_BLOCK_DAYS", "2"))
         # ATR volatility stop: stop distance = max(tuned %, ATR×mult). 0 = off
         # (use only the optimizer's fixed %). ~1.5–2.5 adapts stops to each name.
         self.atr_stop_mult = float(cfg("ATR_STOP_MULT", "0") or 0)
@@ -545,11 +554,25 @@ class Bot:
                 snap = derivatives.snapshot(symbol)
                 if snap["reason"] != "—":
                     log(f"🏛️  market session/VIX — {snap['reason']}")
+                # Finnhub (free, only if a key is set): analyst lean + earnings.
+                fh_on = self.finnhub_gate and finnhub_data.enabled()
+                fh_earn = finnhub_data.earnings_within(
+                    symbol, self.earnings_block_days) if fh_on else None
+                fh_analyst = finnhub_data.analyst_bias(symbol) if fh_on else None
+                if fh_analyst is not None:
+                    log(f"🧑‍💼 {symbol} analyst bullishness {fh_analyst:.2f} "
+                        f"(min {self.analyst_min})")
                 if self.smart_gate and bias is not None and bias < self.smart_min:
                     self._skip_log(symbol, f"lagging the market "
                                    f"(RS {bias:.2f} < {self.smart_min})")
                 elif self.deriv_gate and not snap["confirm_long"]:
                     self._skip_log(symbol, f"market-risk veto — {snap['reason']}")
+                elif fh_earn:
+                    self._skip_log(symbol, f"earnings within "
+                                   f"{self.earnings_block_days}d — gap risk")
+                elif fh_analyst is not None and fh_analyst < self.analyst_min:
+                    self._skip_log(symbol, f"analysts net bearish "
+                                   f"({fh_analyst:.2f} < {self.analyst_min})")
                 else:
                     self.open_position(symbol, price)
             elif signal == "buy" and not trend_ok:
