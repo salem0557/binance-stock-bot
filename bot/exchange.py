@@ -137,6 +137,7 @@ class Exchange:
         self.mode = mode
         self.client = None
         self._steps = {}
+        self._notional = {}
         if mode in ("testnet", "live"):
             self._connect(api_key, api_secret)
 
@@ -269,6 +270,25 @@ class Exchange:
                     step = float(f["stepSize"])
         self._steps[symbol] = step
         return step
+
+    def min_notional(self, symbol):
+        """Minimum order value (quote) Binance accepts for ``symbol``.
+
+        Orders below this fail with -1013 NOTIONAL. Returns a sensible default
+        in dryrun / on error so the pre-flight check still works."""
+        if symbol in self._notional:
+            return self._notional[symbol]
+        val = 5.0
+        if self.mode in ("testnet", "live"):
+            try:
+                info = self.client.get_symbol_info(symbol)
+                for f in (info or {}).get("filters", []):
+                    if f["filterType"] in ("MIN_NOTIONAL", "NOTIONAL"):
+                        val = float(f.get("minNotional") or f.get("notional") or val)
+            except Exception:
+                pass
+        self._notional[symbol] = val
+        return val
 
     def _round_qty(self, qty, step):
         if step <= 0:
