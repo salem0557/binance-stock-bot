@@ -296,6 +296,18 @@ class Bot:
                                "(too thin to enter)")
                 return
         quote = self.quote_per_trade * self.regime.get("risk_multiplier", 1.0)
+        # Pre-flight: make sure the order can actually clear Binance's minimum,
+        # so we log one clear message instead of spamming -1013 NOTIONAL errors.
+        if self.mode in ("live", "testnet"):
+            free = self.ex.free_balance("USDT")
+            need = self.ex.min_notional(symbol)
+            spend = min(quote, free)
+            if spend < max(need, 1.0):
+                self._skip_log(symbol,
+                               f"order {spend:.2f} USDT below Binance minimum "
+                               f"{need:.2f} (free USDT {free:.2f}) — fund the "
+                               f"account, free up holdings, or lower TOP_N")
+                return
         fill, qty = self.ex.buy(symbol, quote, price)
         with self._lock:
             self.state["positions"][symbol] = {
