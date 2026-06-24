@@ -174,6 +174,10 @@ class Bot:
         # --- entry gates ---
         self.news_gate = _flag("NEWS_GATE", "true")
         self.deriv_gate = _flag("DERIVATIVES_GATE", "true")          # VIX panic / session
+        # Trade only during US regular trading hours — INDEPENDENT of any other
+        # gate, so turning DERIVATIVES_GATE off doesn't accidentally enable
+        # off-hours buying on thin tokenized prices.
+        self.trade_rth_only = _flag("TRADE_RTH_ONLY", "true")
         self.trend_filter = _flag("MARKET_TREND_FILTER", "true")     # S&P > MA200
         self.trend_ma = int(cfg("MARKET_TREND_MA", "200"))
         self.pause_trading = _flag("PAUSE_TRADING", "false")
@@ -404,6 +408,9 @@ class Bot:
             if symbol not in target:
                 return
             if len(self.state["positions"]) >= self.max_open:
+                return
+            if self.trade_rth_only and not market.is_rth():
+                self._skip_log(symbol, "outside US market hours (TRADE_RTH_ONLY)")
                 return
             if self.trend_filter and not self.market_bull:
                 self._skip_log(symbol, f"market downtrend ({self.market_trend_reason})")
