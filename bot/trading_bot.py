@@ -160,12 +160,16 @@ class Bot:
         # the wallet with another bot, so the rest is left untouched for it.
         self.max_alloc = float(cfg("MAX_ALLOCATION_USDT", "0") or 0)
 
-        # --- exits (wide, position-investing style) ---
-        self.stop_loss = float(cfg("STOP_LOSS_PCT", "18") or 0)
-        self.trailing = float(cfg("TRAILING_STOP_PCT", "15") or 0)
-        self.take_profit = float(cfg("TAKE_PROFIT_PCT", "0") or 0)   # 0 = let winners run
+        # --- exits (daily-trading style: small take-profit, tight stop) ---
+        self.stop_loss = float(cfg("STOP_LOSS_PCT", "3") or 0)
+        self.trailing = float(cfg("TRAILING_STOP_PCT", "0") or 0)
+        self.take_profit = float(cfg("TAKE_PROFIT_PCT", "2") or 0)    # bank small wins
         self.trend_exit = _flag("TREND_EXIT", "true")                # exit under SMA200
         self.max_spread = float(cfg("MAX_SPREAD_PCT", "0.8") or 0)
+        # Flatten positions before the US close so nothing is held overnight
+        # (resume next session). bStocks trade 24/7 but the underlying doesn't.
+        self.close_at_session_end = _flag("CLOSE_AT_SESSION_END", "true")
+        self.close_before_min = int(cfg("CLOSE_BEFORE_MIN", "10"))
 
         # --- entry gates ---
         self.news_gate = _flag("NEWS_GATE", "true")
@@ -174,13 +178,17 @@ class Bot:
         self.trend_ma = int(cfg("MARKET_TREND_MA", "200"))
         self.pause_trading = _flag("PAUSE_TRADING", "false")
 
-        # --- cadence (slow — this is investing, not scalping) ---
-        self.poll_seconds = int(cfg("POLL_SECONDS", "300"))
+        # --- cadence (intraday daily trading) ---
+        self.poll_seconds = int(cfg("POLL_SECONDS", "60"))
         self.realtime = _flag("REALTIME_LEARNING", "false")
-        self.optimize_hours = float(cfg("OPTIMIZE_HOURS", "12"))
+        self.optimize_hours = float(cfg("OPTIMIZE_HOURS", "4"))
         self.learn_seconds = float(cfg("LEARN_SECONDS", "3600"))
 
         self.daily_loss_limit = float(cfg("DAILY_LOSS_LIMIT", "0") or 0)
+        # Daily profit target (USDT of realized PnL). When the day's realized
+        # profit reaches this, the bot LOCKS IN by closing everything and stops
+        # opening new trades until tomorrow. 0 = off.
+        self.daily_profit_target = float(cfg("DAILY_PROFIT_TARGET", "0") or 0)
         self._last_skip_log = {}
         self.start_equity = float(cfg("PAPER_EQUITY", "500"))
 
@@ -364,6 +372,13 @@ class Bot:
         sc = self.state["scores"].get(symbol, {})
 
         if pos:
+            # Flatten before the bell so nothing is held overnight (resume next
+            # session). mtc=None means the market is already closed.
+            if self.close_at_session_end:
+                mtc = market.minutes_to_close()
+                if mtc is None or mtc <= self.close_before_min:
+                    self.close_position(symbol, price, "session end (flat overnight)")
+                    return
             entry = pos["entry_price"]
             pos["peak"] = max(pos.get("peak", entry), price)
             change = (price / entry - 1) * 100 if entry else 0
@@ -411,19 +426,28 @@ class Bot:
     # --------------------------- risk / kill ---------------------------
     def check_daily_limit(self):
         today = str(date.today())
-        hit = False
+        hit = None
         with self._lock:
             if self.state.get("day") != today:
                 self.state["day"] = today
                 self.state["day_start_realized"] = self.state["realized_pnl"]
                 self.state["halted"] = False
-            if self.daily_loss_limit > 0:
+            if not self.state["halted"]:
                 day_pnl = self.state["realized_pnl"] - self.state["day_start_realized"]
-                if day_pnl <= -abs(self.daily_loss_limit) and not self.state["halted"]:
+                if self.daily_loss_limit > 0 and day_pnl <= -abs(self.daily_loss_limit):
                     self.state["halted"] = True
-                    hit = True
+                    hit = ("loss", day_pnl)
+                elif self.daily_profit_target > 0 and day_pnl >= self.daily_profit_target:
+                    self.state["halted"] = True
+                    hit = ("profit", day_pnl)
         if hit:
-            log("🛑 Daily loss limit hit. Pausing new entries until tomorrow.")
+            kind, pnl = hit
+            if kind == "profit":
+                log(f"🎯 Daily profit target reached (+{pnl:.2f} USDT). Locking in "
+                    "— closing positions and stopping until tomorrow.")
+            else:
+                log(f"🛑 Daily loss limit hit ({pnl:.2f} USDT). Pausing new entries "
+                    "until tomorrow.")
 
     # ------------------------- fast loop -------------------------
     def _handle_manual_sells(self):
