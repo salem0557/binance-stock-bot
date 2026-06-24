@@ -108,6 +108,48 @@ def earnings_within(symbol, days=2):
     return len(data.get("earningsCalendar") or []) > 0
 
 
+def basic_metrics(symbol):
+    """Finnhub 'Basic Financials' dict for the underlying stock, or None."""
+    data = _get(f"/stock/metric?symbol={ticker_of(symbol)}&metric=all", ttl=86400)
+    if not data or not isinstance(data, dict) or "metric" not in data:
+        return None
+    return data.get("metric") or None
+
+
+def dividend_yield(symbol):
+    """Indicated annual dividend yield (%) of the underlying stock, or None.
+
+    Many quality names pay little/no dividend — None/0 just means 'no yield
+    bonus', it is never a reason to avoid a stock."""
+    m = basic_metrics(symbol)
+    if not m:
+        return None
+    for k in ("dividendYieldIndicatedAnnual", "currentDividendYieldTTM",
+              "dividendYield5Y"):
+        v = m.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def earnings_growth(symbol):
+    """A simple earnings-quality read (EPS growth %, TTM) or None."""
+    m = basic_metrics(symbol)
+    if not m:
+        return None
+    for k in ("epsGrowthTTMYoy", "epsGrowth5Y", "revenueGrowthTTMYoy"):
+        v = m.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
 def news_score(symbol, days=3):
     """Net keyword sentiment over recent company headlines, or None.
 

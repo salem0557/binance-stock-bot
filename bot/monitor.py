@@ -84,7 +84,7 @@ pre{background:#0a0e17;border:1px solid var(--bd);border-radius:12px;padding:12p
 <div class="st"><div class="l">VIX (مزاج السوق)</div><div class="v" id="fng">—</div></div>
 </div>
 <h2>الصفقات المفتوحة</h2><div class="scroll"><table id="pos"><thead><tr><th>السهم</th><th>دخول</th><th>الآن</th><th>ربح%</th><th>إجراء</th></tr></thead><tbody></tbody></table></div>
-<h2>الاستراتيجية المتعلّمة</h2><div class="scroll"><table id="str"><thead><tr><th>السهم</th><th>حالة</th><th>سريع/بطيء</th><th>عائد الباك-تيست</th><th>ML</th></tr></thead><tbody></tbody></table></div>
+<h2>التقييم الاستثماري (أفق 3 أشهر)</h2><div class="scroll"><table id="str"><thead><tr><th>السهم</th><th>حالة</th><th>عائد 3 أشهر</th><th>قوة نسبية</th><th>محلّلون</th><th>توزيعات</th></tr></thead><tbody></tbody></table></div>
 <h2>آخر الصفقات</h2><div class="scroll"><table id="trd"><thead><tr><th>وقت</th><th>سهم</th><th>نوع</th><th>سعر</th><th>سبب</th></tr></thead><tbody></tbody></table></div>
 <h2>السجلّ المباشر</h2><pre id="logs">…</pre>
 <script>
@@ -113,7 +113,7 @@ async function tick(){
   $('op').textContent=(d.positions||[]).length;const R=d.regime||{};
   $('fng').textContent=R.fear_greed==null?'—':R.fear_greed+(R.fear_greed_label?(' '+R.fear_greed_label):'');
   let b=$('pos').querySelector('tbody');b.innerHTML=(d.positions||[]).map(x=>`<tr><td>${x.symbol}</td><td>${f(x.entry_price,4)}</td><td>${f(x.price,4)}</td><td class=${cl(x.pnl_pct)}>${sg(x.pnl_pct)}%</td><td><button class="sell" onclick="sellPos('${x.symbol}')">بيع</button></td></tr>`).join('')||'<tr><td colspan=5 class=mut>لا صفقات</td></tr>';
-  b=$('str').querySelector('tbody');b.innerHTML=(d.strategy||[]).map(s=>{let pp=s.params||{},bt=s.backtest||{};return `<tr><td>${s.symbol}</td><td class=${s.active?'up':'mut'}>${s.active?'يتداول':'مراقبة'}</td><td>${pp.fast??'—'}/${pp.slow??'—'}</td><td class=${cl(bt.return_pct)}>${bt.return_pct==null?'—':sg(bt.return_pct)+'%'}</td><td>${s.ml_accuracy==null?'—':(s.ml_accuracy*100|0)+'%'}</td></tr>`}).join('');
+  b=$('str').querySelector('tbody');b.innerHTML=(d.strategy||[]).map(s=>{let bt=s.backtest||{};let tr=bt.trend_ok===false?' <span class=dn>↓</span>':' <span class=up>↑</span>';return `<tr><td>${s.symbol}${tr}</td><td class=${s.active?'up':'mut'}>${s.active?'مُختار':'مراقبة'}</td><td class=${cl(bt.return_pct)}>${bt.return_pct==null?'—':sg(bt.return_pct)+'%'}</td><td class=${cl(bt.rs)}>${bt.rs==null?'—':sg(bt.rs)+'%'}</td><td>${s.ml_accuracy==null?'—':(s.ml_accuracy*100|0)+'%'}</td><td>${bt.dividend_yield==null?'—':bt.dividend_yield+'%'}</td></tr>`}).join('');
   b=$('trd').querySelector('tbody');b.innerHTML=(d.recent_trades||[]).slice().reverse().map(t=>`<tr><td class=mut>${ago(t.time)}</td><td>${t.symbol}</td><td class=${t.side==='BUY'?'up':'dn'}>${t.side==='BUY'?'شراء':'بيع'}</td><td>${f(t.price,4)}</td><td class=mut>${t.reason||''}</td></tr>`).join('')||'<tr><td colspan=5 class=mut>لا صفقات بعد</td></tr>';
  }catch(e){}
  try{$('logs').textContent=await(await fetch('/logs?t='+Date.now())).text()}catch(e){}
