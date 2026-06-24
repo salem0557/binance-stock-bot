@@ -114,6 +114,17 @@ def vix_level():
     return closes[-1] if closes else None
 
 
+def stock_daily_closes(ticker, rng="2y"):
+    """Daily closes (oldest first) for ANY underlying US stock/ETF ticker, via
+    Stooq (``ticker.us``) then Yahoo. Gives YEARS of history even when the
+    tokenized bStock itself is only days old — so momentum/trend can be computed
+    from the real company. Cached 6h."""
+    t = (ticker or "").strip().upper()
+    if not t:
+        return []
+    return _series(f"stk:{t}", f"{t.lower()}.us", t, ttl=21600)
+
+
 def vix_label(vix):
     """Human label for a VIX level (Arabic)."""
     if vix is None:
