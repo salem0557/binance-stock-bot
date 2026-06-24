@@ -43,6 +43,7 @@ import best_practices
 import smart_money
 import derivatives
 import finnhub_data
+import coach
 import market
 import publish
 import monitor
@@ -189,6 +190,12 @@ class Bot:
         self.learn_seconds = float(cfg("LEARN_SECONDS", "3600"))
 
         self.daily_loss_limit = float(cfg("DAILY_LOSS_LIMIT", "0") or 0)
+        # Self-coaching: learn from realized + back-tested trades.
+        self.coach_on = _flag("COACH_ENABLED", "true")
+        # Level-3 entry filter: skip entries whose ML win-probability is below
+        # this. 0 = advisory only (never reduces trade count). e.g. 0.45 to filter.
+        self.coach_min = float(cfg("COACH_MIN_WINPROB", "0") or 0)
+        self._last_coach_ts = 0.0
         # Daily profit target (USDT of realized PnL). When the day's realized
         # profit reaches this, the bot LOCKS IN by closing everything and stops
         # opening new trades until tomorrow. 0 = off.
@@ -257,6 +264,19 @@ class Bot:
         log("🧮 Rebalance — scoring underlying stocks (3-month view)")
         if self.auto_universe and (time.time() - self._last_universe_ts) >= 24 * 3600:
             self.refresh_universe()
+        # Self-coaching: retrain the ML coach on back-tested trades (every ~6h).
+        if self.coach_on and (time.time() - self._last_coach_ts) >= 6 * 3600:
+            try:
+                info = coach.train(list(self.universe), self.take_profit, self.stop_loss)
+                if info:
+                    log(f"🎓 coach trained on {info['samples']} historical trades "
+                        f"(val acc {info['val_acc']})")
+            except Exception as e:
+                log(f"coach train error: {e}")
+            self._last_coach_ts = time.time()
+        ps = coach.perf_summary(self.state) if self.coach_on else []
+        if ps:
+            log("📚 performance memory: " + ", ".join(ps))
         new_scores, evals = {}, {}
         for symbol in self.universe:
             try:
@@ -280,7 +300,14 @@ class Bot:
 
         eligible = [(s, ev) for s, ev in evals.items()
                     if ev["trend_ok"] and ev["score"] > self.min_score]
-        eligible.sort(key=lambda x: x[1]["score"], reverse=True)
+
+        # Level 1: weight each score by the symbol's learned win-rate so proven
+        # winners rank higher and repeat losers sink (without cutting trade count).
+        def _weighted(item):
+            s, ev = item
+            mult = coach.symbol_multiplier(self.state, s) if self.coach_on else 1.0
+            return ev["score"] * mult
+        eligible.sort(key=_weighted, reverse=True)
         target = [s for s, ev in eligible][: self.top_n]
         analyst_map = {s: evals[s]["analyst"] for s in evals}
 
@@ -363,6 +390,8 @@ class Bot:
             if self.mode == "dryrun":
                 self.state["equity"] += fill * qty
             record_trade(self.state, "SELL", symbol, fill, qty, self.mode, reason)
+            if self.coach_on:                     # learn from this outcome
+                coach.record_outcome(self.state, symbol, pnl, reason)
             self.state["positions"].pop(symbol, None)
         pct = (fill / pos["entry_price"] - 1) * 100 if pos["entry_price"] else 0
         log(f"🔴 SELL {symbol} {qty:.6f} @ {fill:.4f} ({reason}) "
@@ -386,14 +415,17 @@ class Bot:
             entry = pos["entry_price"]
             pos["peak"] = max(pos.get("peak", entry), price)
             change = (price / entry - 1) * 100 if entry else 0
+            # Level 2: adapt the stop to recent whipsaw experience.
+            stop, tp = (coach.adaptive_exits(self.state, self.stop_loss, self.take_profit)
+                        if self.coach_on else (self.stop_loss, self.take_profit))
             reason = None
-            if self.stop_loss and change <= -self.stop_loss:
+            if stop and change <= -stop:
                 reason = f"stop-loss {change:.1f}%"
             elif self.trailing and pos["peak"] > entry and \
                     price <= pos["peak"] * (1 - self.trailing / 100):
                 drop = (price / pos["peak"] - 1) * 100
                 reason = f"trailing stop ({drop:.1f}% from peak, P/L {change:+.1f}%)"
-            elif self.take_profit and change >= self.take_profit:
+            elif tp and change >= tp:
                 reason = f"take-profit {change:.1f}%"
             elif self.trend_exit and sc.get("trend_ok") is False:
                 reason = f"trend break — under 200-day line (P/L {change:+.1f}%)"
@@ -422,6 +454,12 @@ class Bot:
             if self.deriv_gate and not snap["confirm_long"]:
                 self._skip_log(symbol, f"market-risk veto — {snap['reason']}")
                 return
+            # Level 3: optional ML-coach entry filter (only when COACH_MIN_WINPROB>0).
+            if self.coach_on and self.coach_min > 0:
+                p = coach.win_probability(symbol)
+                if p is not None and p < self.coach_min:
+                    self._skip_log(symbol, f"coach win-prob {p} < {self.coach_min}")
+                    return
             self.open_position(symbol, price)
 
     def _skip_log(self, symbol, msg):
