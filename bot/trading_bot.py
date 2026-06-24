@@ -155,6 +155,10 @@ class Bot:
         self.max_open = int(cfg("MAX_OPEN_POSITIONS", "3"))
         self.quote_per_trade = float(cfg("QUOTE_PER_TRADE", "50"))
         self.min_score = float(cfg("MIN_SCORE", "0") or 0)
+        # Total USDT this bot may have deployed across all its stock positions at
+        # once. 0 = no cap (just TOP_N x QUOTE_PER_TRADE). Set this when you share
+        # the wallet with another bot, so the rest is left untouched for it.
+        self.max_alloc = float(cfg("MAX_ALLOCATION_USDT", "0") or 0)
 
         # --- exits (wide, position-investing style) ---
         self.stop_loss = float(cfg("STOP_LOSS_PCT", "18") or 0)
@@ -296,6 +300,19 @@ class Bot:
                                "(too thin to enter)")
                 return
         quote = self.quote_per_trade * self.regime.get("risk_multiplier", 1.0)
+        # Budget cap (shared-wallet friendly): never let this bot's total stock
+        # cost basis exceed MAX_ALLOCATION_USDT, so any extra balance (and new
+        # deposits) is left for another bot sharing the same USDT wallet.
+        if self.max_alloc > 0:
+            deployed = sum(p["entry_price"] * p["qty"]
+                           for p in self.state["positions"].values())
+            remaining = self.max_alloc - deployed
+            if remaining <= 0:
+                self._skip_log(symbol, f"stock budget reached — deployed "
+                               f"{deployed:.1f}/{self.max_alloc:.0f} USDT "
+                               "(MAX_ALLOCATION_USDT)")
+                return
+            quote = min(quote, remaining)
         # Pre-flight: make sure the order can actually clear Binance's minimum,
         # so we log one clear message instead of spamming -1013 NOTIONAL errors.
         if self.mode in ("live", "testnet"):
