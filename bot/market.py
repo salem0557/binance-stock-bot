@@ -179,3 +179,15 @@ def session_state():
 def is_rth():
     """True when the US market is in regular trading hours right now."""
     return session_state()["rth"]
+
+
+def minutes_to_close():
+    """Minutes left until the US session close (16:00 ET), or None if the
+    market is already closed. Used to flatten positions before the bell."""
+    et = _now_et()
+    if et.weekday() >= 5 or et.date() in _HOLIDAYS:
+        return None
+    close = et.replace(hour=16, minute=0, second=0, microsecond=0)
+    if et.time() < dtime(9, 30) or et.time() > dtime(16, 0):
+        return None
+    return max(0.0, (close - et).total_seconds() / 60.0)
