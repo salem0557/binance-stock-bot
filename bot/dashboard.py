@@ -42,6 +42,7 @@ def write_snapshot(mode, symbols, active, params, positions, scores,
                     (prices.get(s, p["entry_price"]) / p["entry_price"] - 1) * 100, 2)
                 if p["entry_price"] else 0.0,
                 "opened": p.get("opened"),
+                "adopted": p.get("adopted", False),
             }
             for s, p in positions.items()
         ],

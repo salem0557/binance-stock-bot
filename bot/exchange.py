@@ -374,6 +374,26 @@ class Exchange:
         price = spent / qty if qty else price_hint
         return price, qty
 
+    def holdings(self):
+        """{asset: total_amount} for every non-USDT asset actually held
+        (free + locked), live/testnet only. Used to re-adopt positions the bot
+        lost track of (e.g. after a redeploy without a persistent volume)."""
+        if self.mode == "dryrun" or not self.client:
+            return {}
+        try:
+            acct = self.client.get_account()
+        except Exception:
+            return {}
+        out = {}
+        for b in acct.get("balances", []):
+            try:
+                amt = float(b["free"]) + float(b["locked"])
+            except (TypeError, ValueError):
+                continue
+            if amt > 0 and b.get("asset") and b["asset"] != "USDT":
+                out[b["asset"]] = amt
+        return out
+
     def free_balance(self, asset):
         """Free (sellable) balance of a base asset; 0.0 in dryrun/on error."""
         if self.mode == "dryrun" or not self.client:
