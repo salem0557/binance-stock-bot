@@ -245,33 +245,59 @@ class Exchange:
         t = self.client.get_symbol_ticker(symbol=symbol)
         return float(t["price"])
 
-    def tickers_1h(self, symbols):
-        """Rolling last-hour stats for several symbols in ONE public call.
+    @staticmethod
+    def _parse_tick(d, out):
+        try:
+            out[d["symbol"]] = {
+                "price": float(d["lastPrice"]),
+                "high": float(d["highPrice"]),
+                "low": float(d["lowPrice"]),
+                "changePct": float(d["priceChangePercent"]),
+            }
+        except (KeyError, TypeError, ValueError):
+            pass
 
-        Returns {symbol: {price, high, low, changePct}} using Binance's
-        /api/v3/ticker?windowSize=1h (last price + 1h high/low + 1h % change).
-        Always uses the public endpoint (market data needs no keys)."""
+    def tickers_1h(self, symbols):
+        """Rolling last-hour stats per symbol: {symbol: {price, high, low,
+        changePct}}. Tries one batched public call, then per-symbol, then a
+        price-only fallback so a price always shows even if the 1h window
+        endpoint is unavailable. Always uses the public endpoint (no keys)."""
         syms = [s for s in symbols if s]
         if not syms:
             return {}
-        arr = urllib.parse.quote(json.dumps(syms))
-        try:
-            data = _public_get(f"/api/v3/ticker?symbols={arr}&windowSize=1h")
-        except Exception:
-            return {}
-        if isinstance(data, dict):
-            data = [data]
         out = {}
-        for d in data:
+        # 1) one batched call. Binance needs the array with NO spaces.
+        try:
+            arr = urllib.parse.quote(json.dumps(syms, separators=(",", ":")))
+            data = _public_get(f"/api/v3/ticker?symbols={arr}&windowSize=1h")
+            for d in (data if isinstance(data, list) else [data]):
+                self._parse_tick(d, out)
+        except Exception:
+            out = {}
+        if out:
+            return out
+        # 2) per-symbol 1h window
+        for s in syms:
             try:
-                out[d["symbol"]] = {
-                    "price": float(d["lastPrice"]),
-                    "high": float(d["highPrice"]),
-                    "low": float(d["lowPrice"]),
-                    "changePct": float(d["priceChangePercent"]),
-                }
-            except (KeyError, TypeError, ValueError):
+                self._parse_tick(
+                    _public_get(f"/api/v3/ticker?symbol={s}&windowSize=1h"), out)
+            except Exception:
                 continue
+        if out:
+            return out
+        # 3) price-only fallback (always shows a live price)
+        try:
+            arr = urllib.parse.quote(json.dumps(syms, separators=(",", ":")))
+            rows = _public_get(f"/api/v3/ticker/price?symbols={arr}")
+            for d in (rows if isinstance(rows, list) else [rows]):
+                try:
+                    out[d["symbol"]] = {"price": float(d["price"]),
+                                        "high": None, "low": None,
+                                        "changePct": None}
+                except (KeyError, TypeError, ValueError):
+                    continue
+        except Exception:
+            pass
         return out
 
     def spread_pct(self, symbol):
