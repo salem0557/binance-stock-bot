@@ -1,14 +1,22 @@
-"""Tiny built-in web monitor so a cloud deploy (Railway/Render/VPS) gives you a
-URL to watch the bot from anywhere — live dashboard + recent logs.
+"""Built-in web monitor / advisor dashboard.
 
-It runs in a daemon thread next to the trading loop and binds to $PORT (set by
-the host). Routes:
-  /           -> dashboard page (reads /bot.json and /logs)
-  /bot.json   -> the current status snapshot
-  /logs       -> recent log lines (plain text)
-  /health     -> "ok" (for uptime checks)
+In advisor mode the bot does not trade by itself — this page is the cockpit:
+  * 15 ranked buy opportunities, each rated 🟢..🟢🟢🟢 by win probability.
+  * Live price per symbol (refreshes every couple of seconds) with an up/down
+    arrow and a flash on every tick, plus the last-hour low–high range.
+  * An amount box + Buy / Sell buttons that place REAL market orders.
 
-Only non-sensitive status is exposed — never API keys.
+Routes:
+  /           -> dashboard page
+  /bot.json   -> status snapshot (recommendations, positions, regime)
+  /prices     -> live prices + 1h high/low (fast, polled by the page)
+  /logs       -> recent log lines
+  /buy  POST  -> queue a real market BUY  (symbol, amount, token)
+  /sell POST  -> queue a real market SELL (symbol, token)
+  /health     -> "ok"
+
+Only non-sensitive status is exposed — never API keys. The Buy/Sell actions are
+guarded by MONITOR_TOKEN (set it — these spend real money).
 """
 
 from __future__ import annotations
@@ -24,14 +32,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 BOT_JSON = HERE.parent / "docs" / "stocks" / "data" / "bot.json"
 
-# ring buffer of recent log lines, filled by trading_bot.log()
 LOGS = deque(maxlen=400)
 
-# Manual-sell requests from the dashboard "بيع" button. The web thread drops a
-# symbol in here; the trading loop drains it each cycle and market-sells it.
-# Optional MONITOR_TOKEN guards the action so a stranger with the URL can't sell.
+_LOCK = threading.Lock()
 _SELL_REQUESTS = set()
-_SELL_LOCK = threading.Lock()
+_BUY_REQUESTS = []          # list of (symbol, amount)
+_LIVE = {}                  # symbol -> {price, high, low, changePct}
 MONITOR_TOKEN = (os.environ.get("MONITOR_TOKEN", "") or "").strip()
 
 
@@ -39,87 +45,112 @@ def add_log(line):
     LOGS.append(line)
 
 
+def set_live(data):
+    """Called by the bot's price loop with fresh {symbol: {...}} stats."""
+    global _LIVE
+    with _LOCK:
+        _LIVE = dict(data)
+
+
 def request_sell(symbol):
-    """Queue a symbol for manual market-sell by the trading loop."""
-    with _SELL_LOCK:
+    with _LOCK:
         _SELL_REQUESTS.add(symbol.upper())
 
 
 def drain_sell_requests():
-    """Return and clear all pending manual-sell symbols (called by the bot)."""
-    with _SELL_LOCK:
+    with _LOCK:
         out = list(_SELL_REQUESTS)
         _SELL_REQUESTS.clear()
     return out
 
 
+def request_buy(symbol, amount):
+    with _LOCK:
+        _BUY_REQUESTS.append((symbol.upper(), amount))
+
+
+def drain_buy_requests():
+    with _LOCK:
+        out = list(_BUY_REQUESTS)
+        _BUY_REQUESTS.clear()
+    return out
+
+
 PAGE = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🤖 بوت أسهم أمريكية (bStocks)</title><style>
+<title>🧭 مستشار الأسهم (bStocks)</title><style>
 :root{--bg:#0b0f1a;--card:#151c2c;--bd:#243049;--tx:#e8edf6;--mut:#93a0bd;--up:#16c784;--dn:#ea3943;--ac:#f7931a}
-*{box-sizing:border-box;margin:0}body{background:var(--bg);color:var(--tx);font-family:-apple-system,Segoe UI,Tahoma,Arial,sans-serif;padding:14px;max-width:960px;margin:auto;line-height:1.6}
-h1{font-size:1.3rem}h2{font-size:1rem;color:var(--ac);margin:20px 0 8px}
+*{box-sizing:border-box;margin:0}body{background:var(--bg);color:var(--tx);font-family:-apple-system,Segoe UI,Tahoma,Arial,sans-serif;padding:14px;max-width:1040px;margin:auto;line-height:1.6}
+h1{font-size:1.25rem}h2{font-size:1rem;color:var(--ac);margin:18px 0 8px}
 .pill{font-size:.78rem;padding:3px 10px;border-radius:999px;border:1px solid var(--bd)}
 .live{background:var(--dn);color:#fff;border-color:var(--dn)}.dryrun{background:var(--up);color:#fff}.testnet{background:#5b8def;color:#fff}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
-.st{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px}.st .l{font-size:.78rem;color:var(--mut)}.st .v{font-size:1.25rem;font-weight:700;margin-top:4px}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
+input{background:#0a0e17;border:1px solid var(--bd);border-radius:8px;color:var(--tx);padding:7px 10px;font-size:.85rem}
 table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--bd);border-radius:12px;overflow:hidden}
-th,td{padding:8px 10px;text-align:right;border-bottom:1px solid var(--bd);font-size:.86rem;white-space:nowrap}th{background:#1b2436;color:var(--mut)}
+th,td{padding:8px 9px;text-align:center;border-bottom:1px solid var(--bd);font-size:.84rem;white-space:nowrap}th{background:#1b2436;color:var(--mut)}
+td.sym{text-align:right;font-weight:700}
 .up{color:var(--up)}.dn{color:var(--dn)}.mut{color:var(--mut)}.scroll{overflow-x:auto}
-.sell{background:var(--dn);color:#fff;border:0;border-radius:8px;padding:5px 12px;font-size:.8rem;cursor:pointer;font-weight:700}.sell:hover{opacity:.85}
-input.tok{background:#0a0e17;border:1px solid var(--bd);border-radius:8px;color:var(--tx);padding:6px 10px;font-size:.8rem}
-pre{background:#0a0e17;border:1px solid var(--bd);border-radius:12px;padding:12px;font-size:.78rem;max-height:320px;overflow:auto;direction:ltr;text-align:left;white-space:pre-wrap}
+.b{border:0;border-radius:8px;padding:5px 12px;font-size:.8rem;cursor:pointer;font-weight:700}
+.buy{background:var(--up);color:#04230f}.sell{background:var(--dn);color:#fff}.b:hover{opacity:.85}
+tr.r3{border-right:4px solid var(--up)}tr.r2{border-right:4px solid #8bd34f}tr.r1{border-right:4px solid #5b8def}
+.flash{animation:fl .6s}@keyframes fl{0%{background:#1f3a2a}100%{background:transparent}}
+.flashd{animation:fld .6s}@keyframes fld{0%{background:#3a1f24}100%{background:transparent}}
+pre{background:#0a0e17;border:1px solid var(--bd);border-radius:12px;padding:12px;font-size:.76rem;max-height:240px;overflow:auto;direction:ltr;text-align:left;white-space:pre-wrap}
+small{color:var(--mut)}
 </style></head><body>
-<h1>🤖 بوت أسهم أمريكية (bStocks) <span id="mode" class="pill">…</span></h1>
-<div id="warn" style="color:var(--ac);margin:8px 0"></div>
-<div style="margin:8px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-<input id="tok" class="tok" placeholder="رمز الحماية (اختياري)">
-<button class="sell" style="background:#5b8def" onclick="saveTok()">حفظ الرمز</button>
-<span class="mut" style="font-size:.75rem">يُحفظ في متصفّحك فقط لتأكيد أوامر البيع اليدوي</span></div>
-<div class="grid">
-<div class="st"><div class="l">قيمة المحفظة (USDT)</div><div class="v" id="eq">—</div></div>
-<div class="st"><div class="l">USDT متاح</div><div class="v" id="freeusdt">—</div></div>
-<div class="st"><div class="l">الربح/الخسارة المحقّقة</div><div class="v" id="pnl">—</div></div>
-<div class="st"><div class="l">صفقات مفتوحة</div><div class="v" id="op">—</div></div>
-<div class="st"><div class="l">VIX (مزاج السوق)</div><div class="v" id="fng">—</div></div>
+<h1>🧭 مستشار الأسهم <span id="mode" class="pill">…</span></h1>
+<div id="warn" style="color:var(--ac);margin:6px 0"></div>
+<div class="bar">
+<span>المبلغ (USDT):</span><input id="amt" type="number" min="1" step="1" value="12" style="width:110px">
+<input id="tok" placeholder="رمز الحماية" style="width:140px">
+<small>المبلغ وزر الشراء/البيع ينفّذان أمراً حقيقياً على Binance</small>
 </div>
-<h2>الصفقات المفتوحة</h2><div class="scroll"><table id="pos"><thead><tr><th>السهم</th><th>دخول</th><th>الآن</th><th>ربح%</th><th>إجراء</th></tr></thead><tbody></tbody></table></div>
-<h2>التقييم الاستثماري (أفق 3 أشهر)</h2><div class="scroll"><table id="str"><thead><tr><th>السهم</th><th>حالة</th><th>عائد 3 أشهر</th><th>قوة نسبية</th><th>محلّلون</th><th>توزيعات</th></tr></thead><tbody></tbody></table></div>
-<h2>آخر الصفقات</h2><div class="scroll"><table id="trd"><thead><tr><th>وقت</th><th>سهم</th><th>نوع</th><th>سعر</th><th>سبب</th></tr></thead><tbody></tbody></table></div>
+<div class="bar" id="stats"></div>
+
+<h2>🎯 أفضل 15 فرصة شراء (الأخضر = فرصة ربح أعلى)</h2>
+<div class="scroll"><table id="rec"><thead><tr>
+<th>السهم</th><th>التقييم</th><th>السعر الآن</th><th>تغيّر ساعة</th><th>أدنى–أعلى (ساعة)</th><th>فرصة الربح</th><th>شراء</th></tr></thead><tbody></tbody></table></div>
+
+<h2>صفقاتي المفتوحة</h2>
+<div class="scroll"><table id="pos"><thead><tr>
+<th>السهم</th><th>دخول</th><th>السعر الآن</th><th>ربح%</th><th>بيع</th></tr></thead><tbody></tbody></table></div>
+
 <h2>السجلّ المباشر</h2><pre id="logs">…</pre>
 <script>
 const $=i=>document.getElementById(i),f=(n,d=2)=>n==null||isNaN(n)?'—':(+n).toLocaleString('en',{maximumFractionDigits:d});
-const sg=(v,d=2)=>(v>0?'+':'')+f(v,d),cl=v=>v>0?'up':v<0?'dn':'';
-function ago(t){if(!t)return'—';let s=(Date.now()-new Date(t))/1e3;return s<60?'الآن':s<3600?(s/60|0)+'د':s<86400?(s/3600|0)+'س':(s/86400|0)+'ي'}
-function saveTok(){localStorage.setItem('montok',$('tok').value.trim());alert('تم حفظ الرمز في هذا المتصفّح')}
-async function sellPos(sym){
- if(!confirm('بيع '+sym+' الآن بأمر سوق فوري؟'))return;
- const t=localStorage.getItem('montok')||'';
- try{const r=await fetch('/sell?symbol='+encodeURIComponent(sym)+'&token='+encodeURIComponent(t),{method:'POST'});
-  const j=await r.json().catch(()=>({}));
-  if(r.ok&&j.ok)alert('📨 أُرسل الطلب للبوت — لم يُنفَّذ بعد!\\n\\nالبيع يحدث في الخلفية على Binance. تابع «السجلّ المباشر» بالأسفل:\\n• 🔴 SELL '+sym+' = تمّ البيع ✅\\n• manual sell failed = رفضه Binance\\n• dust = الصفقة أصغر من الحد الأدنى (بِعها يدوياً من تطبيق Binance)');
-  else alert('❌ فشل إرسال الطلب: '+(j.error||('رمز الحماية غير صحيح؟ ('+r.status+')')));
- }catch(e){alert('❌ تعذّر الاتصال بالبوت')}
- setTimeout(tick,1500);
+const sg=(v,d=2)=>v==null||isNaN(v)?'—':((v>0?'+':'')+f(v,d)),cl=v=>v>0?'up':v<0?'dn':'';
+const stars=r=>'🟢'.repeat(r||1);
+let REC=[],POS=[],LIVE={},LAST={};
+function amt(){return Math.max(1,+($('amt').value||0))}
+function tok(){return $('tok').value.trim()}
+async function buy(s){if(!confirm('شراء '+s+' بمبلغ '+amt()+' USDT الآن؟'))return;
+ const r=await fetch('/buy?symbol='+encodeURIComponent(s)+'&amount='+amt()+'&token='+encodeURIComponent(tok()),{method:'POST'});
+ const j=await r.json().catch(()=>({}));alert(r.ok&&j.ok?'📨 أُرسل أمر شراء '+s+' — تابع السجلّ':'❌ '+(j.error||'فشل (رمز الحماية؟)'));}
+async function sell(s){if(!confirm('بيع '+s+' الآن؟'))return;
+ const r=await fetch('/sell?symbol='+encodeURIComponent(s)+'&token='+encodeURIComponent(tok()),{method:'POST'});
+ const j=await r.json().catch(()=>({}));alert(r.ok&&j.ok?'📨 أُرسل أمر بيع '+s:'❌ '+(j.error||'فشل (رمز الحماية؟)'));}
+function priceCell(s){const L=LIVE[s];if(!L)return '<span class=mut>…</span>';
+ const prev=LAST[s];let arrow='',cls='';if(prev!=null){if(L.price>prev){arrow='▲';cls='up'}else if(L.price<prev){arrow='▼';cls='dn'}}
+ return '<span class="'+cls+'" id="p_'+s+'">'+f(L.price,4)+' '+arrow+'</span>';}
+function rng(s){const L=LIVE[s];return L?('<span class=dn>'+f(L.low,4)+'</span> – <span class=up>'+f(L.high,4)+'</span>'):'—';}
+function chg(s){const L=LIVE[s];return L?'<span class="'+cl(L.changePct)+'">'+sg(L.changePct)+'%</span>':'—';}
+function render(){
+ let b=$('rec').querySelector('tbody');
+ b.innerHTML=REC.map(x=>`<tr class="r${x.rating}"><td class=sym>${x.ticker||x.symbol}</td><td>${stars(x.rating)}</td><td id="rc_${x.symbol}">${priceCell(x.symbol)}</td><td>${chg(x.symbol)}</td><td>${rng(x.symbol)}</td><td>${x.win_prob==null?('عائد '+sg(x.ret_3m)+'%'):((x.win_prob*100|0)+'%')}</td><td><button class="b buy" onclick="buy('${x.symbol}')">شراء</button></td></tr>`).join('')||'<tr><td colspan=7 class=mut>يحسب الترشيحات…</td></tr>';
+ b=$('pos').querySelector('tbody');
+ b.innerHTML=POS.map(p=>{const L=LIVE[p.symbol];const now=L?L.price:p.price;const pl=p.entry_price?((now/p.entry_price-1)*100):0;
+  return `<tr><td class=sym>${p.symbol}</td><td>${f(p.entry_price,4)}</td><td>${priceCell(p.symbol)}</td><td class=${cl(pl)}>${sg(pl)}%</td><td><button class="b sell" onclick="sell('${p.symbol}')">بيع</button></td></tr>`}).join('')||'<tr><td colspan=5 class=mut>لا صفقات</td></tr>';
+ for(const s in LIVE)LAST[s]=LIVE[s].price;
 }
-async function tick(){
- try{const d=await(await fetch('/bot.json?t='+Date.now())).json();
-  const m=$('mode');m.textContent=({dryrun:'محاكاة',testnet:'تجريبي',live:'حقيقي'}[d.mode]||d.mode||'—');m.className='pill '+(d.mode||'');
-  $('warn').textContent=d.mode==='live'?'⚠️ يتداول بأموال حقيقية':'';
-  const ac=d.account||{};
-  $('eq').textContent=f(ac.total_usdt!=null?ac.total_usdt:d.equity_quote);
-  $('freeusdt').textContent=ac.free_usdt!=null?f(ac.free_usdt):'—';
-  const p=$('pnl');p.textContent=sg(d.realized_pnl_quote);p.className='v '+cl(d.realized_pnl_quote);
-  $('op').textContent=(d.positions||[]).length;const R=d.regime||{};
-  $('fng').textContent=R.fear_greed==null?'—':R.fear_greed+(R.fear_greed_label?(' '+R.fear_greed_label):'');
-  let b=$('pos').querySelector('tbody');b.innerHTML=(d.positions||[]).map(x=>`<tr><td>${x.symbol}</td><td>${f(x.entry_price,4)}</td><td>${f(x.price,4)}</td><td class=${cl(x.pnl_pct)}>${sg(x.pnl_pct)}%</td><td><button class="sell" onclick="sellPos('${x.symbol}')">بيع</button></td></tr>`).join('')||'<tr><td colspan=5 class=mut>لا صفقات</td></tr>';
-  b=$('str').querySelector('tbody');b.innerHTML=(d.strategy||[]).map(s=>{let bt=s.backtest||{};let tr=bt.trend_ok===false?' <span class=dn>↓</span>':' <span class=up>↑</span>';return `<tr><td>${s.symbol}${tr}</td><td class=${s.active?'up':'mut'}>${s.active?'مُختار':'مراقبة'}</td><td class=${cl(bt.return_pct)}>${bt.return_pct==null?'—':sg(bt.return_pct)+'%'}</td><td class=${cl(bt.rs)}>${bt.rs==null?'—':sg(bt.rs)+'%'}</td><td>${s.ml_accuracy==null?'—':(s.ml_accuracy*100|0)+'%'}</td><td>${bt.dividend_yield==null?'—':bt.dividend_yield+'%'}</td></tr>`}).join('');
-  b=$('trd').querySelector('tbody');b.innerHTML=(d.recent_trades||[]).slice().reverse().map(t=>`<tr><td class=mut>${ago(t.time)}</td><td>${t.symbol}</td><td class=${t.side==='BUY'?'up':'dn'}>${t.side==='BUY'?'شراء':'بيع'}</td><td>${f(t.price,4)}</td><td class=mut>${t.reason||''}</td></tr>`).join('')||'<tr><td colspan=5 class=mut>لا صفقات بعد</td></tr>';
- }catch(e){}
- try{$('logs').textContent=await(await fetch('/logs?t='+Date.now())).text()}catch(e){}
-}
-try{$('tok').value=localStorage.getItem('montok')||''}catch(e){}
-tick();setInterval(tick,5000);
+async function pull(){try{const d=await(await fetch('/bot.json?t='+Date.now())).json();
+ const m=$('mode');m.textContent=({dryrun:'محاكاة',testnet:'تجريبي',live:'حقيقي'}[d.mode]||d.mode||'—');m.className='pill '+(d.mode||'');
+ $('warn').textContent=d.mode==='live'?'⚠️ الأزرار تنفّذ أوامر بأموال حقيقية':'';
+ REC=d.recommendations||[];POS=d.positions||[];const R=d.regime||{};const ac=d.account||{};
+ $('stats').innerHTML=`<span class=pill>USDT متاح: ${ac.free_usdt!=null?f(ac.free_usdt):'—'}</span> <span class=pill>المحفظة: ${f(ac.total_usdt!=null?ac.total_usdt:d.equity_quote)}</span> <span class=pill>VIX: ${R.fear_greed==null?'—':R.fear_greed+' '+(R.fear_greed_label||'')}</span>`;
+ render();}catch(e){}}
+async function ticks(){try{LIVE=await(await fetch('/prices?t='+Date.now())).json()||{};render();}catch(e){}}
+async function logs(){try{$('logs').textContent=await(await fetch('/logs?t='+Date.now())).text()}catch(e){}}
+pull();ticks();logs();setInterval(pull,5000);setInterval(ticks,2000);setInterval(logs,5000);
 </script></body></html>"""
 
 
@@ -143,6 +174,10 @@ class _Handler(BaseHTTPRequestHandler):
                            "application/json; charset=utf-8")
             except Exception:
                 self._send(200, "{}", "application/json")
+        elif path == "/prices":
+            with _LOCK:
+                body = json.dumps(_LIVE)
+            self._send(200, body, "application/json; charset=utf-8")
         elif path == "/logs":
             self._send(200, "\n".join(LOGS), "text/plain; charset=utf-8")
         elif path == "/health":
@@ -150,33 +185,46 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, "not found", "text/plain")
 
+    def _auth(self, params):
+        token = params.get("token", [""])[0]
+        return not MONITOR_TOKEN or token == MONITOR_TOKEN
+
     def do_POST(self):
         path, _, q = self.path.partition("?")
-        if path == "/sell":
-            params = urllib.parse.parse_qs(q)
-            symbol = (params.get("symbol", [""])[0] or "").upper()
-            token = params.get("token", [""])[0]
-            if MONITOR_TOKEN and token != MONITOR_TOKEN:
+        params = urllib.parse.parse_qs(q)
+        if path in ("/buy", "/sell"):
+            if not self._auth(params):
                 self._send(403, json.dumps({"ok": False, "error": "رمز غير صحيح"}),
                            "application/json; charset=utf-8")
                 return
+            symbol = (params.get("symbol", [""])[0] or "").upper()
             if not symbol:
                 self._send(400, json.dumps({"ok": False, "error": "no symbol"}),
                            "application/json")
                 return
-            request_sell(symbol)
+            if path == "/buy":
+                try:
+                    amount = float(params.get("amount", ["0"])[0])
+                except ValueError:
+                    amount = 0.0
+                if amount < 1:
+                    self._send(400, json.dumps({"ok": False, "error": "مبلغ غير صالح"}),
+                               "application/json; charset=utf-8")
+                    return
+                request_buy(symbol, amount)
+            else:
+                request_sell(symbol)
             self._send(200, json.dumps({"ok": True, "symbol": symbol}),
                        "application/json; charset=utf-8")
         else:
             self._send(404, json.dumps({"ok": False, "error": "not found"}),
                        "application/json")
 
-    def log_message(self, *args):  # silence default request logging
+    def log_message(self, *args):
         pass
 
 
 def start(port):
-    """Start the monitor server in a background daemon thread."""
     srv = ThreadingHTTPServer(("0.0.0.0", int(port)), _Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
