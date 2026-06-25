@@ -150,6 +150,47 @@ def earnings_growth(symbol):
     return None
 
 
+def insider_sentiment(symbol):
+    """Average insider sentiment (MSPR, -100..100) over recent months, or None.
+
+    MSPR is Finnhub's proprietary insider-buying score; a strongly positive value
+    has historically led price over the next 30-90 days. Free endpoint."""
+    today = date.today()
+    frm = (today - timedelta(days=120)).isoformat()
+    to = today.isoformat()
+    d = _get(f"/stock/insider-sentiment?symbol={ticker_of(symbol)}"
+             f"&from={frm}&to={to}", ttl=86400)
+    if not d or not isinstance(d, dict):
+        return None
+    rows = d.get("data") or []
+    vals = [r.get("mspr") for r in rows
+            if isinstance(r, dict) and r.get("mspr") is not None]
+    if not vals:
+        return None
+    try:
+        return round(sum(float(v) for v in vals) / len(vals), 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def headlines(symbol, n=3, days=5):
+    """Up to ``n`` recent company headlines: [{headline, url, source}]."""
+    today = date.today()
+    frm = (today - timedelta(days=days)).isoformat()
+    to = today.isoformat()
+    rows = _get(f"/company-news?symbol={ticker_of(symbol)}"
+                f"&from={frm}&to={to}", ttl=1800)
+    if not rows or not isinstance(rows, list):
+        return []
+    out = []
+    for it in rows[:n]:
+        h = (it.get("headline") or "").strip()
+        if h:
+            out.append({"headline": h[:140], "url": it.get("url", ""),
+                        "source": it.get("source", "")})
+    return out
+
+
 def news_score(symbol, days=3):
     """Net keyword sentiment over recent company headlines, or None.
 

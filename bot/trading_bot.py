@@ -325,7 +325,10 @@ class Bot:
                 "symbol": s, "ticker": finnhub_data.ticker_of(s),
                 "rating": rating, "win_prob": wp, "score": ev["score"],
                 "ret_3m": ev["ret_3m"], "rs": ev["rs"],
-                "dividend_yield": ev["dividend_yield"], "trend_ok": ev["trend_ok"]})
+                "dividend_yield": ev["dividend_yield"], "trend_ok": ev["trend_ok"],
+                "insider": ev.get("insider"), "near_high": ev.get("near_high"),
+                "earnings_soon": finnhub_data.earnings_within(s, 3),
+                "news": finnhub_data.headlines(s, 2)})
 
         eligible = [(s, ev) for s, ev in evals.items()
                     if ev["trend_ok"] and ev["score"] > self.min_score]
