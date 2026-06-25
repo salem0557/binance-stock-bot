@@ -574,6 +574,8 @@ class Bot:
                 for s in self.state.get("positions", {}):
                     if s not in syms:
                         syms.append(s)
+                if not syms:                       # before first rebalance
+                    syms = list(self.universe)
                 if syms:
                     data = self.ex.tickers_1h(syms)
                     if data:
