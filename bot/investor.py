@@ -68,14 +68,23 @@ def evaluate(symbol):
     a = analyst if analyst is not None else 0.5
     dividend = finnhub_data.dividend_yield(symbol) or 0.0   # %
     eps_g = finnhub_data.earnings_growth(symbol)            # % or None
+    news = finnhub_data.news_score(symbol)                  # net headline score or None
+    insider = finnhub_data.insider_sentiment(symbol)        # MSPR -100..100 or None
 
-    # Composite score (momentum-led, trend-gated, quality-tilted, yield-bonus).
+    # 52-week-high proximity: stocks pressing new highs tend to keep leading.
+    hi252 = max(closes[-252:]) if len(closes) >= 60 else max(closes)
+    near_high = (price / hi252) if hi252 else 0.0
+
+    # Composite score (momentum-led, trend-gated, quality + sentiment tilted).
     score = (100.0 * momentum
              + (20.0 if trend_ok else -40.0)
              + 100.0 * rs
              + (a - 0.5) * 30.0
              + min(dividend, 6.0) * 1.5
-             + (max(-50.0, min(50.0, eps_g)) * 0.1 if eps_g is not None else 0.0))
+             + (max(-50.0, min(50.0, eps_g)) * 0.1 if eps_g is not None else 0.0)
+             + (max(-8.0, min(8.0, news)) * 1.0 if news is not None else 0.0)
+             + ((insider / 100.0) * 15.0 if insider is not None else 0.0)
+             + (12.0 if near_high >= 0.95 else -10.0 if near_high < 0.75 else 0.0))
 
     return {
         "score": round(score, 2),
@@ -86,6 +95,9 @@ def evaluate(symbol):
         "analyst": analyst,
         "dividend_yield": round(dividend, 2),
         "eps_growth": round(eps_g, 1) if eps_g is not None else None,
+        "news": news,
+        "insider": insider,
+        "near_high": round(near_high * 100, 1),
         "sma200": sma200,
         "price": price,
     }

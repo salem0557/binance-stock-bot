@@ -115,6 +115,8 @@ small{color:var(--mut)}
 <div class="scroll"><table id="pos"><thead><tr>
 <th>السهم</th><th>دخول</th><th>السعر الآن</th><th>ربح%</th><th>بيع</th></tr></thead><tbody></tbody></table></div>
 
+<h2>📰 أخبار الأسهم المرشّحة</h2><div id="news"><small>…</small></div>
+
 <h2>السجلّ المباشر</h2><pre id="logs">…</pre>
 <script>
 const $=i=>document.getElementById(i),f=(n,d=2)=>n==null||isNaN(n)?'—':(+n).toLocaleString('en',{maximumFractionDigits:d});
@@ -136,7 +138,9 @@ function rng(s){const L=LIVE[s];return L?('<span class=dn>'+f(L.low,4)+'</span> 
 function chg(s){const L=LIVE[s];return L?'<span class="'+cl(L.changePct)+'">'+sg(L.changePct)+'%</span>':'—';}
 function render(){
  let b=$('rec').querySelector('tbody');
- b.innerHTML=REC.map(x=>`<tr class="r${x.rating}"><td class=sym>${x.ticker||x.symbol}</td><td>${stars(x.rating)}</td><td id="rc_${x.symbol}">${priceCell(x.symbol)}</td><td>${chg(x.symbol)}</td><td>${rng(x.symbol)}</td><td>${x.win_prob==null?('عائد '+sg(x.ret_3m)+'%'):((x.win_prob*100|0)+'%')}</td><td><button class="b buy" onclick="buy('${x.symbol}')">شراء</button></td></tr>`).join('')||'<tr><td colspan=7 class=mut>يحسب الترشيحات…</td></tr>';
+ b.innerHTML=REC.map(x=>`<tr class="r${x.rating}"><td class=sym>${x.ticker||x.symbol}${x.earnings_soon?' 📅':''}${x.insider>20?' 👤':''}</td><td>${stars(x.rating)}</td><td id="rc_${x.symbol}">${priceCell(x.symbol)}</td><td>${chg(x.symbol)}</td><td>${rng(x.symbol)}</td><td>${x.win_prob==null?('عائد '+sg(x.ret_3m)+'%'):((x.win_prob*100|0)+'%')}</td><td><button class="b buy" onclick="buy('${x.symbol}')">شراء</button></td></tr>`).join('')||'<tr><td colspan=7 class=mut>يحسب الترشيحات…</td></tr>';
+ const nx=REC.flatMap(x=>(x.news||[]).map(n=>`<div style="padding:5px 0;border-bottom:1px solid var(--bd)"><b>${x.ticker}</b> — <a href="${n.url}" target="_blank" style="color:var(--tx)">${n.headline}</a> <small>${n.source||''}</small></div>`));
+ $('news').innerHTML=nx.join('')||'<small>لا أخبار حديثة</small>';
  b=$('pos').querySelector('tbody');
  b.innerHTML=POS.map(p=>{const L=LIVE[p.symbol];const now=L?L.price:p.price;const pl=p.entry_price?((now/p.entry_price-1)*100):0;
   return `<tr><td class=sym>${p.symbol}</td><td>${f(p.entry_price,4)}</td><td>${priceCell(p.symbol)}</td><td class=${cl(pl)}>${sg(pl)}%</td><td><button class="b sell" onclick="sell('${p.symbol}')">بيع</button></td></tr>`}).join('')||'<tr><td colspan=5 class=mut>لا صفقات</td></tr>';
