@@ -639,6 +639,45 @@ class Bot:
                 log(f"background error: {e}")
             time.sleep(5)
 
+    def _adopt_holdings(self):
+        """Re-track bStocks already in the account that the bot isn't tracking
+        (e.g. lost after a redeploy, or bought directly in the Binance app), so
+        they reappear in the dashboard and can be sold. Safe: it never sells —
+        only registers the holding. Entry price is set to the current price
+        (the true entry is unknown), so P/L is shown from now on."""
+        if self.mode == "dryrun":
+            return
+        # Only auto-adopt in advisor mode (no auto-sell) unless explicitly enabled.
+        if not (self.advisor_mode or _flag("ADOPT_HOLDINGS", "false")):
+            return
+        try:
+            held = self.ex.holdings()
+        except Exception:
+            return
+        from exchange import KNOWN_BSTOCKS
+        added = []
+        for asset, amt in held.items():
+            symbol = asset + "USDT"
+            if (asset not in KNOWN_BSTOCKS and symbol not in self.universe):
+                continue
+            if symbol in self.state["positions"]:
+                continue
+            try:
+                price = self.ex.last_price(symbol)
+            except Exception:
+                continue
+            if price * amt < self.ex.min_notional(symbol):   # dust
+                continue
+            with self._lock:
+                self.state["positions"][symbol] = {
+                    "entry_price": price, "qty": amt, "opened": iso(),
+                    "peak": price, "adopted": True}
+            added.append(symbol)
+        if added:
+            with self._lock:
+                save_state(self.state)
+            log(f"📥 adopted existing holdings (entry≈current price): {added}")
+
     def _refresh_balance(self):
         if (time.time() - self._last_bal_ts) < 60:
             return
@@ -654,6 +693,7 @@ class Bot:
                 self.state["equity"] = summ["total_usdt"]
             log(f"💰 balance: {summ['total_usdt']} USDT total, "
                 f"{summ['free_usdt']} USDT free")
+        self._adopt_holdings()
         self._last_bal_ts = time.time()
 
     def _refresh_market_trend(self):
@@ -716,6 +756,10 @@ class Bot:
         if self.mode == "live":
             log("⚠️  LIVE MODE — investing REAL money. Ctrl+C to stop.")
 
+        try:
+            self._adopt_holdings()        # recover any holdings we lost track of
+        except Exception as e:
+            log(f"adopt holdings error: {e}")
         try:
             self.rebalance()
             self._last_opt_ts = time.time()

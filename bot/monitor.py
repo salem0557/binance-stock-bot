@@ -144,7 +144,7 @@ function render(){
  $('news').innerHTML=nx.join('')||'<small>لا أخبار حديثة</small>';
  b=$('pos').querySelector('tbody');
  b.innerHTML=POS.map(p=>{const L=LIVE[p.symbol];const now=L?L.price:p.price;const pl=p.entry_price?((now/p.entry_price-1)*100):0;
-  return `<tr><td class=sym>${p.symbol}</td><td>${f(p.entry_price,4)}</td><td>${priceCell(p.symbol)}</td><td class=${cl(pl)}>${sg(pl)}%</td><td><button class="b sell" onclick="sell('${p.symbol}')">بيع</button></td></tr>`}).join('')||'<tr><td colspan=5 class=mut>لا صفقات</td></tr>';
+  return `<tr><td class=sym>${p.symbol}</td><td>${f(p.entry_price,4)}${p.adopted?' <small class=mut>تقريبي</small>':''}</td><td>${priceCell(p.symbol)}</td><td class=${cl(pl)}>${sg(pl)}%</td><td><button class="b sell" onclick="sell('${p.symbol}')">بيع</button></td></tr>`}).join('')||'<tr><td colspan=5 class=mut>لا صفقات</td></tr>';
  for(const s in LIVE)LAST[s]=LIVE[s].price;
 }
 async function pull(){try{const d=await(await fetch('/bot.json?t='+Date.now())).json();
