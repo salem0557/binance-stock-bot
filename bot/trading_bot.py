@@ -196,6 +196,12 @@ class Bot:
         # this. 0 = advisory only (never reduces trade count). e.g. 0.45 to filter.
         self.coach_min = float(cfg("COACH_MIN_WINPROB", "0") or 0)
         self._last_coach_ts = 0.0
+        # Advisor mode: the bot does NOT auto buy/sell. It only ranks buy
+        # opportunities and serves the dashboard; you trade via the Buy/Sell
+        # buttons (real orders). Auto-trading stays off while this is true.
+        self.advisor_mode = _flag("ADVISOR_MODE", "false")
+        self.price_refresh = float(cfg("PRICE_REFRESH_SECONDS", "4"))
+        self._last_prices = {}
         # Daily profit target (USDT of realized PnL). When the day's realized
         # profit reaches this, the bot LOCKS IN by closing everything and stops
         # opening new trades until tomorrow. 0 = off.
@@ -298,6 +304,29 @@ class Bot:
                 f"trend={'↑' if ev['trend_ok'] else '↓'} "
                 f"div={ev['dividend_yield']}% analyst={ev['analyst']}")
 
+        # Build the ranked buy-opportunity list for the advisor dashboard:
+        # every evaluated stock, sorted by win probability (coach) then score,
+        # top 15, each rated 1..3 greens by how good the opportunity is.
+        recs = []
+        for s, ev in evals.items():
+            wp = coach.win_probability(s) if self.coach_on else None
+            recs.append((s, ev, wp))
+        recs.sort(key=lambda x: (x[2] if x[2] is not None else -1,
+                                 x[1]["score"]), reverse=True)
+        rec_out = []
+        for s, ev, wp in recs[:15]:
+            if wp is not None:
+                rating = 3 if wp >= 0.58 else 2 if wp >= 0.50 else 1
+            else:
+                rating = 3 if ev["score"] > 200 else 2 if ev["score"] > 50 else 1
+            if not ev["trend_ok"]:
+                rating = 1
+            rec_out.append({
+                "symbol": s, "ticker": finnhub_data.ticker_of(s),
+                "rating": rating, "win_prob": wp, "score": ev["score"],
+                "ret_3m": ev["ret_3m"], "rs": ev["rs"],
+                "dividend_yield": ev["dividend_yield"], "trend_ok": ev["trend_ok"]})
+
         eligible = [(s, ev) for s, ev in evals.items()
                     if ev["trend_ok"] and ev["score"] > self.min_score]
 
@@ -323,6 +352,7 @@ class Bot:
                     active.append(held)
             self.state["active"] = active
             self.state["target"] = target
+            self.state["recommendations"] = rec_out
             self.state["last_optimize"] = iso()
             self.candidates = list(self.universe)
             save_state(self.state)
@@ -507,20 +537,65 @@ class Bot:
             except Exception as e:
                 log(f"⚠️  manual sell failed for {symbol}: {e}")
 
-    def manage_cycle(self):
-        self._handle_manual_sells()
-        prices = {}
-        for symbol in list(self.state.get("active", [])):
+    def _handle_manual_buys(self):
+        """Execute Buy-button requests: a REAL market buy for the entered USDT
+        amount, tracked as a position so it can be sold from the dashboard."""
+        for symbol, amount in monitor.drain_buy_requests():
             try:
-                if self.state.get("halted"):
-                    if symbol in self.state["positions"]:
-                        price = self.ex.last_price(symbol)
-                        prices[symbol] = price
-                        self.close_position(symbol, price, "daily halt")
+                if symbol in self.state["positions"]:
+                    log(f"↩️  manual buy ignored — already holding {symbol}")
                     continue
-                self.manage_symbol(symbol, prices)
+                price = self.ex.last_price(symbol)
+                need = self.ex.min_notional(symbol)
+                if amount < max(need, 1.0):
+                    log(f"⚠️  manual buy {symbol}: {amount} USDT below minimum {need}")
+                    continue
+                fill, qty = self.ex.buy(symbol, amount, price)
+                with self._lock:
+                    self.state["positions"][symbol] = {
+                        "entry_price": fill, "qty": qty,
+                        "opened": iso(), "peak": fill}
+                    if self.mode == "dryrun":
+                        self.state["equity"] -= fill * qty
+                    record_trade(self.state, "BUY", symbol, fill, qty,
+                                 self.mode, "manual")
+                log(f"🟢 manual BUY {symbol} {qty:.6f} @ {fill:.4f}")
             except Exception as e:
-                log(f"   {symbol}: error {e}")
+                log(f"⚠️  manual buy failed for {symbol}: {e}")
+
+    def price_loop(self):
+        """Refresh live prices + 1h high/low for the dashboard every few sec."""
+        while True:
+            try:
+                syms = [r["symbol"] for r in self.state.get("recommendations", [])]
+                for s in self.state.get("positions", {}):
+                    if s not in syms:
+                        syms.append(s)
+                if syms:
+                    data = self.ex.tickers_1h(syms)
+                    if data:
+                        self._last_prices = {s: d["price"] for s, d in data.items()}
+                        monitor.set_live(data)
+            except Exception as e:
+                log(f"price loop error: {e}")
+            time.sleep(self.price_refresh)
+
+    def manage_cycle(self):
+        self._handle_manual_buys()
+        self._handle_manual_sells()
+        prices = dict(self._last_prices)
+        if not self.advisor_mode:
+            for symbol in list(self.state.get("active", [])):
+                try:
+                    if self.state.get("halted"):
+                        if symbol in self.state["positions"]:
+                            price = self.ex.last_price(symbol)
+                            prices[symbol] = price
+                            self.close_position(symbol, price, "daily halt")
+                        continue
+                    self.manage_symbol(symbol, prices)
+                except Exception as e:
+                    log(f"   {symbol}: error {e}")
 
         with self._lock:
             save_state(self.state)
@@ -532,6 +607,7 @@ class Bot:
                     self.state["trades"], self.state["equity"],
                     self.state["realized_pnl"], self.state["last_optimize"],
                     prices, regime=self.regime, account=self.account,
+                    recommendations=self.state.get("recommendations"),
                     learning={"realtime": self.realtime,
                               "poll_seconds": self.poll_seconds,
                               "optimize_hours": self.optimize_hours})
@@ -640,6 +716,13 @@ class Bot:
             self._last_opt_ts = time.time()
         except Exception as e:
             log(f"initial rebalance error: {e}")
+
+        if self.advisor_mode:
+            log("🧭 ADVISOR MODE — no auto-trading; use the dashboard Buy/Sell "
+                "buttons. Live prices on every refresh.")
+
+        # Live price/1h-range feed for the dashboard.
+        threading.Thread(target=self.price_loop, daemon=True).start()
 
         if "--once" in sys.argv:
             self.manage_cycle()

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+import urllib.parse
 import urllib.request
 
 # Public market-data hosts, tried in order. data-api.binance.vision is the
@@ -243,6 +244,35 @@ class Exchange:
             return self.closes(symbol, "1m", 1)[-1]
         t = self.client.get_symbol_ticker(symbol=symbol)
         return float(t["price"])
+
+    def tickers_1h(self, symbols):
+        """Rolling last-hour stats for several symbols in ONE public call.
+
+        Returns {symbol: {price, high, low, changePct}} using Binance's
+        /api/v3/ticker?windowSize=1h (last price + 1h high/low + 1h % change).
+        Always uses the public endpoint (market data needs no keys)."""
+        syms = [s for s in symbols if s]
+        if not syms:
+            return {}
+        arr = urllib.parse.quote(json.dumps(syms))
+        try:
+            data = _public_get(f"/api/v3/ticker?symbols={arr}&windowSize=1h")
+        except Exception:
+            return {}
+        if isinstance(data, dict):
+            data = [data]
+        out = {}
+        for d in data:
+            try:
+                out[d["symbol"]] = {
+                    "price": float(d["lastPrice"]),
+                    "high": float(d["highPrice"]),
+                    "low": float(d["lowPrice"]),
+                    "changePct": float(d["priceChangePercent"]),
+                }
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
 
     def spread_pct(self, symbol):
         """Best bid/ask spread as a % of price (liquidity / escape gauge).
