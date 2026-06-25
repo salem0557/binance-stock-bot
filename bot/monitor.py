@@ -136,9 +136,10 @@ function priceCell(s){const L=LIVE[s];if(!L)return '<span class=mut>…</span>';
  return '<span class="'+cls+'" id="p_'+s+'">'+f(L.price,4)+' '+arrow+'</span>';}
 function rng(s){const L=LIVE[s];return L?('<span class=dn>'+f(L.low,4)+'</span> – <span class=up>'+f(L.high,4)+'</span>'):'—';}
 function chg(s){const L=LIVE[s];return L?'<span class="'+cl(L.changePct)+'">'+sg(L.changePct)+'%</span>':'—';}
+function insiderBadge(v){if(v==null)return'';return v>=60?' 👤👤👤':v>=40?' 👤👤':v>=20?' 👤':''}
 function render(){
  let b=$('rec').querySelector('tbody');
- b.innerHTML=REC.map(x=>`<tr class="r${x.rating}"><td class=sym>${x.ticker||x.symbol}${x.earnings_soon?' 📅':''}${x.insider>20?' 👤':''}</td><td>${stars(x.rating)}</td><td id="rc_${x.symbol}">${priceCell(x.symbol)}</td><td>${chg(x.symbol)}</td><td>${rng(x.symbol)}</td><td>${x.win_prob==null?('عائد '+sg(x.ret_3m)+'%'):((x.win_prob*100|0)+'%')}</td><td><button class="b buy" onclick="buy('${x.symbol}')">شراء</button></td></tr>`).join('')||'<tr><td colspan=7 class=mut>يحسب الترشيحات…</td></tr>';
+ b.innerHTML=REC.map(x=>`<tr class="r${x.rating}"><td class=sym>${x.ticker||x.symbol}${x.earnings_soon?' 📅':''}${insiderBadge(x.insider)}</td><td>${stars(x.rating)}</td><td id="rc_${x.symbol}">${priceCell(x.symbol)}</td><td>${chg(x.symbol)}</td><td>${rng(x.symbol)}</td><td>${x.win_prob==null?('عائد '+sg(x.ret_3m)+'%'):((x.win_prob*100|0)+'%')}</td><td><button class="b buy" onclick="buy('${x.symbol}')">شراء</button></td></tr>`).join('')||'<tr><td colspan=7 class=mut>يحسب الترشيحات…</td></tr>';
  const nx=REC.flatMap(x=>(x.news||[]).map(n=>`<div style="padding:5px 0;border-bottom:1px solid var(--bd)"><b>${x.ticker}</b> — <a href="${n.url}" target="_blank" style="color:var(--tx)">${n.headline}</a> <small>${n.source||''}</small></div>`));
  $('news').innerHTML=nx.join('')||'<small>لا أخبار حديثة</small>';
  b=$('pos').querySelector('tbody');
