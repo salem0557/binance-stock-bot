@@ -1,96 +1,87 @@
-"""Paper spot-grid engine (shared by the live bot and the backtest).
+"""Classic spot-grid engine, shared by the live paper bot and the daily review.
 
-Rules:
-- Grid of N levels around the start price (+-RANGE). Each level holds one slice of the capital.
-- Price falls through a level  -> buy one slice (unless the crash guard is on).
-- Price rises through a level  -> don't sell yet; follow the price and sell only after it
-  pulls back TRAIL from its peak ("if it keeps rising, wait").
-- Crash guard: if price fell more than CRASH in the last CRASH_WINDOW seconds, stop buying.
-- If price goes above the whole grid and everything is sold, re-centre the grid higher.
+- Geometric grid: levels are `step` apart (e.g. 0.008 = 0.8%), `half_levels` below and above
+  the start price. Each level holds one slice of the capital.
+- Price falls to a level below  -> buy one slice; it will be sold one level higher.
+- Price rises to a level above  -> sell the slice bought one level lower (profit = one step).
+- Price breaks above the grid with everything sold -> re-centre the grid at the new price.
+- Price falls `stop_below` under the grid -> sell everything and re-centre lower
+  (None = hold the coins and wait for the price to come back).
 """
 import time
 
+MIN_ORDER = 5.0  # Binance minimum order value (USDT)
+
 
 class Grid:
-    def __init__(self, capital, price, rng=0.15, n=20, fee=0.001, trail=0.005,
-                 crash=0.05, crash_window=4 * 3600, now=None):
-        self.fee, self.trail, self.rng, self.n = fee, trail, rng, n
-        self.crash, self.crash_window = crash, crash_window
+    def __init__(self, capital, price, step=0.008, half_levels=8, fee=0.001,
+                 stop_below=0.06, now=None):
+        self.step, self.half, self.fee, self.stop_below = step, half_levels, fee, stop_below
         self.cash = capital
-        self.fills = []          # (ts, side, price, qty, pnl)
-        self.history = []        # (ts, price) for crash guard
+        self.bags = {}       # level index -> coin qty waiting to be sold at that level
+        self.fills = []      # (ts, side, price, qty, pnl, reason)
         self.realized = 0.0
-        self._build(price, time.time() if now is None else now)
+        self.recentres = 0
+        self.build(price, time.time() if now is None else now)
 
-    # ---------- setup ----------
-    def _build(self, price, now):
-        lo, hi = price * (1 - self.rng), price * (1 + self.rng)
-        step = (hi - lo) / self.n
-        self.levels = [lo + i * step for i in range(self.n + 1)]
-        self.slice = (self.cash + self.coin_value(price)) / self.n
-        self.buys = set()        # level index with a pending buy
-        self.bags = {}           # sell level index -> (qty, cost)
-        self.peak = {}           # sell level index -> highest price since crossed
-        for i, lv in enumerate(self.levels):
-            if lv < price - step / 2:
-                self.buys.add(i)
-            elif lv > price + step / 2 and self.cash >= self.slice:  # pre-buy coins for levels above
-                self._buy(i - 1, price, now, pre=True)
-
-    def coin_value(self, price):
-        return sum(q for q, _ in getattr(self, "bags", {}).values()) * price
+    def coins(self):
+        return sum(self.bags.values())
 
     def equity(self, price):
-        return self.cash + self.coin_value(price)
+        return self.cash + self.coins() * price
 
-    # ---------- actions ----------
-    def _buy(self, i, price, now, pre=False):
-        amt = min(self.slice, self.cash)
-        if amt < 5:              # Binance minimum order
-            return
-        qty = amt / price * (1 - self.fee)
-        self.cash -= amt
-        self.bags[i + 1] = (qty, amt)
-        self.buys.discard(i)
-        self.fills.append((now, "BUY", price, qty, 0.0))
+    def build(self, price, now):
+        """(Re)build the grid around `price`; buy coins for the sell levels above."""
+        n = 2 * self.half
+        self.levels = [price * (1 + self.step) ** (i - self.half) for i in range(n + 1)]
+        self.ptr = self.half                       # the empty level (closest to price)
+        self.slice = self.equity(price) / n
+        # (always called with no coins held: at start, after a sell-out or a stop)
+        for j in range(self.ptr + 1, n + 1):
+            amt = min(self.slice, self.cash)
+            if amt < MIN_ORDER:
+                break
+            self.cash -= amt
+            self.bags[j] = amt / price * (1 - self.fee)
+            self.fills.append((now, "BUY", price, self.bags[j], 0.0, "setup"))
 
-    def _sell(self, i, price, now):
-        qty, cost = self.bags.pop(i)
-        got = qty * price * (1 - self.fee)
-        self.cash += got
-        pnl = got - cost
-        self.realized += pnl
-        self.peak.pop(i, None)
-        self.buys.add(i - 1)
-        self.fills.append((now, "SELL", price, qty, pnl))
+    def _sell_all(self, price, now, reason):
+        for j in list(self.bags):
+            q = self.bags.pop(j)
+            got = q * price * (1 - self.fee)
+            self.cash += got
+            cost = self.slice
+            self.realized += got - cost
+            self.fills.append((now, "SELL", price, q, got - cost, reason))
 
-    def crashing(self, price, now):
-        old = [p for t, p in self.history if t >= now - self.crash_window]
-        return bool(old) and price < max(old) * (1 - self.crash)
-
-    # ---------- main ----------
-    def on_price(self, prev, price, now):
-        self.history.append((now, price))
-        if len(self.history) > 5000:
-            self.history = [h for h in self.history if h[0] >= now - self.crash_window]
-        lo, hi = min(prev, price), max(prev, price)
-        # buys: price falling through a buy level
-        if price < prev and not self.crashing(price, now):
-            for i in sorted(self.buys, reverse=True):
-                if lo <= self.levels[i] <= hi:
-                    self._buy(i, self.levels[i], now)
-        # sells: arm when price reaches the level, sell after a pullback from the peak
-        for i in list(self.bags):
-            if i >= len(self.levels):
-                continue
-            lv = self.levels[i]
-            if i in self.peak:
-                self.peak[i] = max(self.peak[i], hi)
-                stop = max(lv, self.peak[i] * (1 - self.trail))
-                if price <= stop:
-                    self._sell(i, stop if lo <= stop else price, now)
-            elif hi >= lv:
-                self.peak[i] = hi
-        # everything sold and price above the grid -> re-centre higher
-        if not self.bags and price > self.levels[-1]:
-            self._build(price, now)
+    def on_price(self, price, now):
+        n = 2 * self.half
+        # buys: price at or below the next level down
+        while self.ptr > 0 and price <= self.levels[self.ptr - 1]:
+            lv = self.levels[self.ptr - 1]
+            if self.cash < max(MIN_ORDER, self.slice * 0.999):
+                break
+            self.cash -= self.slice
+            q = self.slice / lv * (1 - self.fee)
+            self.bags[self.ptr] = q
+            self.ptr -= 1
+            self.fills.append((now, "BUY", lv, q, 0.0, "grid"))
+        # sells: price at or above the next level up
+        while self.ptr < n and price >= self.levels[self.ptr + 1] and (self.ptr + 1) in self.bags:
+            lv = self.levels[self.ptr + 1]
+            q = self.bags.pop(self.ptr + 1)
+            got = q * lv * (1 - self.fee)
+            pnl = got - self.slice
+            self.cash += got
+            self.realized += pnl
+            self.ptr += 1
+            self.fills.append((now, "SELL", lv, q, pnl, "grid"))
+        # broke out above with nothing left to sell -> follow the price up
+        if self.ptr == n and price > self.levels[-1] and not self.bags:
+            self.recentres += 1
+            self.build(price, now)
+        # crashed below the grid -> cut and re-centre lower
+        elif self.stop_below is not None and price < self.levels[0] * (1 - self.stop_below):
+            self._sell_all(price, now, "stop")
+            self.recentres += 1
+            self.build(price, now)

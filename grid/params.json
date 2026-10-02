@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "pairs": ["ETH/USDT", "SOL/USDT"],
+  "capital": 200,
+  "step": 0.005,
+  "half_levels": 8,
+  "stop_below": null
+}

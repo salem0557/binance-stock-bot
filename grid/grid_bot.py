@@ -1,15 +1,10 @@
 """SalemGrid - paper (virtual) spot-grid bot using live Binance prices.
 
 No API key needed: prices come from Binance public data. No real orders are placed.
-Settings (Railway variables, all optional):
-  GRID_PAIRS    BTC/USDT,ETH/USDT   coins to trade (capital is split equally)
-  GRID_CAPITAL  200                 virtual USDT
-  GRID_LEVELS   16                  grid lines per coin
-  GRID_RANGE    0.15                grid covers +-15% around the start price
-  GRID_TRAIL    0                   e.g. 0.005 = wait for 0.5% pullback before selling
-  GRID_CRASH    0                   e.g. 0.05 = stop buying after a 5% drop in 4h
+Settings live in grid/params.json (updated by the daily review). When the version
+changes, the bot closes its virtual positions and rebuilds the grids with the new settings.
 """
-import csv, os, pickle, time, traceback
+import csv, json, os, pickle, time, traceback
 from datetime import datetime, timezone, timedelta
 
 import ccxt
@@ -17,16 +12,12 @@ import requests
 
 from grid_core import Grid
 
+HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.getenv("DATA_DIR", "/data")
 STATE = os.path.join(DATA, "grid_state.pkl")
 FILLS = os.path.join(DATA, "grid_fills.csv")
-PAIRS = [p.strip() for p in os.getenv("GRID_PAIRS", "BTC/USDT,ETH/USDT").split(",") if p.strip()]
-CAPITAL = float(os.getenv("GRID_CAPITAL", "200"))
-LEVELS = int(os.getenv("GRID_LEVELS", "16"))
-RANGE = float(os.getenv("GRID_RANGE", "0.15"))
-TRAIL = float(os.getenv("GRID_TRAIL", "0"))
-CRASH = float(os.getenv("GRID_CRASH", "0")) or 9.0   # 9.0 = never triggers
 TG_TOKEN, TG_CHAT = os.getenv("TG_TOKEN", ""), os.getenv("TG_CHAT_ID", "")
+TG_EACH_TRADE = os.getenv("GRID_TG_TRADES", "off") == "on"   # 20+ trades/day -> off by default
 RIYADH = timezone(timedelta(hours=3))
 
 
@@ -43,8 +34,15 @@ def tg(msg):
             pass
 
 
-def new_grid(pair, price, capital):
-    return Grid(capital, price, rng=RANGE, n=LEVELS, trail=TRAIL, crash=CRASH)
+def load_params():
+    with open(os.path.join(HERE, "params.json")) as f:
+        return json.load(f)
+
+
+def make_grids(params, prices, capital):
+    each = capital / len(params["pairs"])
+    return {p: Grid(each, prices[p], step=params["step"], half_levels=params["half_levels"],
+                    stop_below=params["stop_below"]) for p in params["pairs"]}
 
 
 def save(state):
@@ -54,76 +52,84 @@ def save(state):
     os.replace(tmp, STATE)
 
 
-def record(pair, fill, equity):
+def record(pair, fill, equity, version):
     new = not os.path.exists(FILLS)
     with open(FILLS, "a", newline="") as f:
         w = csv.writer(f)
         if new:
-            w.writerow(["time", "pair", "side", "price", "qty", "pnl_usdt", "pair_equity"])
-        ts, side, price, qty, pnl = fill
-        w.writerow([datetime.fromtimestamp(ts, RIYADH).isoformat(timespec="seconds"),
-                    pair, side, f"{price:.6f}", f"{qty:.8f}", f"{pnl:.4f}", f"{equity:.2f}"])
+            w.writerow(["time", "pair", "side", "price", "qty", "pnl_usdt", "reason",
+                        "pair_equity", "params_version"])
+        ts, side, price, qty, pnl, reason = fill
+        w.writerow([datetime.fromtimestamp(ts, RIYADH).isoformat(timespec="seconds"), pair, side,
+                    f"{price:.6f}", f"{qty:.8f}", f"{pnl:.4f}", reason, f"{equity:.2f}", version])
 
 
-def summary(state, prices):
-    eq = sum(g.equity(prices[p]) for p, g in state["grids"].items())
-    lines = [f"📊 SalemGrid (virtual)  equity: {eq:.2f} USDT  "
-             f"({(eq / state['start_capital'] - 1) * 100:+.2f}%)  refills: {state['refills']}"]
-    for p, g in state["grids"].items():
-        sells = sum(1 for f in g.fills if f[1] == "SELL")
-        lines.append(f"{p}: {g.equity(prices[p]):.2f}  realized {g.realized:+.2f}  sells {sells}")
-    return "\n".join(lines)
+def total_equity(state, prices):
+    return sum(g.equity(prices[p]) for p, g in state["grids"].items())
 
 
 def main():
     os.makedirs(DATA, exist_ok=True)
     ex = ccxt.binance({"enableRateLimit": True})
-    prices = {p: ex.fetch_ticker(p)["last"] for p in PAIRS}
-    if os.path.exists(STATE):
-        state = pickle.load(open(STATE, "rb"))
-        log(f"resumed state, refills={state['refills']}")
+    params = load_params()
+    state = pickle.load(open(STATE, "rb")) if os.path.exists(STATE) else None
+    pairs = set(params["pairs"]) | (set(state["grids"]) if state else set())
+    prices = {p: ex.fetch_ticker(p)["last"] for p in pairs}
+
+    if state is None:
+        state = {"grids": make_grids(params, prices, params["capital"]), "version": params["version"],
+                 "start_capital": params["capital"], "day": datetime.now(RIYADH).date(),
+                 "day_start_equity": params["capital"], "day_trades": 0}
+        log(f"new grids v{params['version']} on {params['pairs']} with {params['capital']} USDT")
+        tg(f"🟢 SalemGrid started (virtual {params['capital']} USDT), settings v{params['version']}")
+    elif state["version"] != params["version"]:
+        eq = 0.0
+        for p, g in state["grids"].items():       # close virtual positions at market
+            before = len(g.fills)
+            g._sell_all(prices[p], time.time(), "new-settings")
+            for fill in g.fills[before:]:
+                record(p, fill, g.cash, state["version"])
+            eq += g.cash
+        state["grids"] = make_grids(params, prices, eq)
+        state["version"] = params["version"]
+        log(f"switched to settings v{params['version']} {params}, equity {eq:.2f}")
+        tg(f"🔧 SalemGrid: new settings v{params['version']} applied (step {params['step']*100:.1f}%, "
+           f"{2*params['half_levels']} levels, pairs {', '.join(params['pairs'])}). Equity {eq:.2f} USDT")
     else:
-        each = CAPITAL / len(PAIRS)
-        state = {"grids": {p: new_grid(p, prices[p], each) for p in PAIRS},
-                 "start_capital": CAPITAL, "refills": 0, "last_summary": time.time()}
-        log(f"new grids on {PAIRS} with {CAPITAL} USDT")
-        tg(f"🟢 SalemGrid started (virtual {CAPITAL:.0f} USDT) on {', '.join(PAIRS)}")
+        log(f"resumed v{state['version']}")
     seen = {p: len(g.fills) for p, g in state["grids"].items()}
-    last = dict(prices)
 
     while True:
         try:
             now = time.time()
             for p, g in state["grids"].items():
                 price = ex.fetch_ticker(p)["last"]
-                g.on_price(last[p], price, now)
-                last[p] = price
+                prices[p] = price
+                g.on_price(price, now)
                 for fill in g.fills[seen[p]:]:
-                    eq = g.equity(price)
-                    record(p, fill, eq)
-                    _, side, fp, qty, pnl = fill
-                    msg = f"{'🟢 BUY ' if side == 'BUY' else '🔴 SELL'} {p} @ {fp:.4f}"
-                    if side == "SELL":
-                        msg += f"  pnl {pnl:+.3f} USDT"
+                    record(p, fill, g.equity(price), state["version"])
+                    _, side, fp, qty, pnl, reason = fill
+                    msg = f"{side} {p} @ {fp:.4f} ({reason})" + (f" pnl {pnl:+.3f}" if side == "SELL" else "")
                     log(msg)
-                    tg(msg)
+                    if side == "SELL":
+                        state["day_trades"] += 1
+                    if TG_EACH_TRADE or reason == "stop":
+                        tg(("⚠️ " if reason == "stop" else "") + msg)
                 seen[p] = len(g.fills)
-                # lost (almost) everything -> refill virtual balance and keep learning
-                each = state["start_capital"] / len(state["grids"])
-                if g.equity(price) < each * 0.1:
-                    state["refills"] += 1
-                    state["grids"][p] = new_grid(p, price, each)
-                    seen[p] = len(state["grids"][p].fills)
-                    tg(f"⚠️ {p} grid lost its balance - refilled to {each:.0f} USDT (refill #{state['refills']})")
-            if now - state["last_summary"] > 24 * 3600:
-                s = summary(state, last)
-                log(s.replace("\n", " | "))
+            today = datetime.now(RIYADH).date()
+            if today != state["day"]:                # end of the Riyadh day -> summary
+                eq = total_equity(state, prices)
+                day_pnl = eq - state["day_start_equity"]
+                s = (f"📊 SalemGrid {state['day']}: {state['day_trades']} completed trades, "
+                     f"day {day_pnl:+.2f} USDT, equity {eq:.2f} USDT "
+                     f"({(eq / state['start_capital'] - 1) * 100:+.2f}% total), settings v{state['version']}")
+                log(s)
                 tg(s)
-                state["last_summary"] = now
+                state.update(day=today, day_start_equity=eq, day_trades=0)
             save(state)
         except Exception:
             log("error: " + traceback.format_exc().splitlines()[-1])
-        time.sleep(10)
+        time.sleep(5)
 
 
 if __name__ == "__main__":

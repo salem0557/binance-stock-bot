@@ -41,17 +41,11 @@ SalemBot - Freqtrade on Railway
   /forceexit all  يقفل كل الصفقات
   /stop     يوقف البوت
 
-SalemGrid (بوت شبكة وهمي)
+SalemGrid (بوت شبكة سريع - وهمي)
 ================================
 يشتغل تلقائياً مع وضع dryrun جنب البوت الأساسي، بأسعار Binance الحقيقية وفلوس وهمية (200 USDT).
-ما يحتاج مفتاح Binance. يرسل كل عملية شراء وبيع على تيليجرام، وملخص يومي.
-السجل محفوظ في /data/grid_fills.csv
-
-متغيرات اختيارية في Railway:
-  GRID = off               يوقف بوت الشبكة
-  GRID_PAIRS = BTC/USDT,ETH/USDT
-  GRID_CAPITAL = 200
-  GRID_LEVELS = 16
-  GRID_RANGE = 0.15        النطاق +-15%
-  GRID_TRAIL = 0.005       (اختياري) لا يبيع وهو طالع، ينتظر نزول 0.5% من القمة
-  GRID_CRASH = 0.05        (اختياري) يوقف الشراء إذا نزل السعر 5% خلال 4 ساعات
+الهدف: 20 صفقة أو أكثر باليوم. ما يحتاج مفتاح Binance.
+الإعدادات في grid/params.json، والمراجعة اليومية (grid/daily_review.py) تعدلها كل ليلة
+وتكتب وش صار ووش تغير في grid/journal.md
+تيليجرام: ملخص آخر كل يوم + تنبيه عند وقف الخسارة (GRID_TG_TRADES = on يرسل كل صفقة)
+GRID = off يوقف بوت الشبكة. السجل الكامل في /data/grid_fills.csv
