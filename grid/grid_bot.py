@@ -188,26 +188,26 @@ def learn(st, prices, now):
            f"❌ الأسوأ: {short(worst)} {rets[worst]:+.2f}%\n"
            f"🔧 التعديل: {'، '.join(notes) or 'ما فيه تعديل'}\n"
            f"💰 الرصيد: {E:.2f}$ ({(E / st['start_capital'] - 1) * 100:+.2f}%) | "
-           f"ساعات رابحة {st['good_hours']} من {st['hours']} | مرات الشحن {st['refills']}")
+           f"ساعات رابحة {st['good_hours']} من {st['hours']}")
     st["hour_t"] = now
     st["hour_eq"] = {p: g.equity(prices[p]) for p, g in st["grids"].items()}
     st["hour_E"] = total_equity(st, prices)    # after rebalancing fees; bank money included
     st["hour_trades"] = {p: 0 for p in st["grids"]}
 
 
-def status_report(st, prices, title):
-    """Real numbers since the start of the current hour."""
+def status_report(st, prices):
+    """Same layout as the hourly report, with real numbers since the current hour started."""
     E = total_equity(st, prices)
     rets = {p: (g.equity(prices[p]) / st["hour_eq"][p] - 1) * 100 if st["hour_eq"].get(p) else 0.0
             for p, g in st["grids"].items()}
     best, worst = max(rets, key=rets.get), min(rets, key=rets.get)
-    mins = int((time.time() - st["hour_t"]) / 60)
-    return (f"{title}\n"
-            f"آخر {mins} دقيقة: {sum(st['hour_trades'].values())} صفقة | النتيجة: {E - st['hour_E']:+.2f}$\n"
+    return (f"🧠 بوت الشبكة - الساعة {st['hours'] + 1}\n"
+            f"الصفقات: {sum(st['hour_trades'].values())} | النتيجة: {E - st['hour_E']:+.2f}$\n"
             f"✅ الأفضل: {short(best)} {rets[best]:+.2f}%\n"
             f"❌ الأسوأ: {short(worst)} {rets[worst]:+.2f}%\n"
+            f"🔧 التعديل: ما فيه تعديل\n"
             f"💰 الرصيد: {E:.2f}$ ({(E / st['start_capital'] - 1) * 100:+.2f}%) | "
-            f"ساعات رابحة {st['good_hours']} من {st['hours']} | مرات الشحن {st['refills']}")
+            f"ساعات رابحة {st['good_hours']} من {st['hours']}")
 
 
 def record_fill(pair, fill, equity):
@@ -236,7 +236,7 @@ def main():
             if set(st["grids"]) != set(PAIRS):
                 raise ValueError("coin list changed")
             log(f"resumed: hour {st['hours']}, equity {total_equity(st, prices):.2f}")
-            tg(status_report(st, prices, "📍 بوت الشبكة - الحالة الآن (رجع يشتغل بعد تحديث)"))
+            tg(status_report(st, prices))
         except Exception as e:
             log(f"starting fresh ({e})")
             st = None
