@@ -72,7 +72,15 @@ def main():
     os.makedirs(DATA, exist_ok=True)
     ex = ccxt.binance({"enableRateLimit": True})
     params = load_params()
-    state = pickle.load(open(STATE, "rb")) if os.path.exists(STATE) else None
+    state = None
+    if os.path.exists(STATE):
+        try:
+            state = pickle.load(open(STATE, "rb"))
+            if "version" not in state or not all(hasattr(g, "ptr") for g in state["grids"].values()):
+                raise ValueError("old format")
+        except Exception as e:
+            log(f"ignoring saved state ({e}), starting fresh")
+            state = None
     pairs = set(params["pairs"]) | (set(state["grids"]) if state else set())
     prices = {p: ex.fetch_ticker(p)["last"] for p in pairs}
 
