@@ -27,8 +27,9 @@ PY
 echo "=== MODE: $MODE | STRATEGY: $STRAT ==="
 
 if [ "$MODE" = "backtest" ]; then
-  TR="${TIMERANGE:-20250101-}"
-  freqtrade download-data -c "$CFG" --datadir "$DATA_DIR/data" -t 1h --timerange "$TR"
+  TR="${TIMERANGE:-20220601-}"
+  # Download extra history before the test start so indicators are ready
+  freqtrade download-data -c "$CFG" --datadir "$DATA_DIR/data" -t 4h 1d --timerange "${DL_FROM:-20220101}-"
   freqtrade backtesting -c "$CFG" --datadir "$DATA_DIR/data" -s "$STRAT" --timerange "$TR" --export none --enable-protections
   echo "=== BACKTEST DONE - change MODE to dryrun when ready ==="
   sleep infinity
