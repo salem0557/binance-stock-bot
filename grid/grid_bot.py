@@ -195,6 +195,21 @@ def learn(st, prices, now):
     st["hour_trades"] = {p: 0 for p in st["grids"]}
 
 
+def status_report(st, prices, title):
+    """Real numbers since the start of the current hour."""
+    E = total_equity(st, prices)
+    rets = {p: (g.equity(prices[p]) / st["hour_eq"][p] - 1) * 100 if st["hour_eq"].get(p) else 0.0
+            for p, g in st["grids"].items()}
+    best, worst = max(rets, key=rets.get), min(rets, key=rets.get)
+    mins = int((time.time() - st["hour_t"]) / 60)
+    return (f"{title}\n"
+            f"آخر {mins} دقيقة: {sum(st['hour_trades'].values())} صفقة | النتيجة: {E - st['hour_E']:+.2f}$\n"
+            f"✅ الأفضل: {short(best)} {rets[best]:+.2f}%\n"
+            f"❌ الأسوأ: {short(worst)} {rets[worst]:+.2f}%\n"
+            f"💰 الرصيد: {E:.2f}$ ({(E / st['start_capital'] - 1) * 100:+.2f}%) | "
+            f"ساعات رابحة {st['good_hours']} من {st['hours']} | مرات الشحن {st['refills']}")
+
+
 def record_fill(pair, fill, equity):
     ts, side, price, qty, pnl, reason = fill
     append_csv(FILLS, ["time", "pair", "side", "price", "qty", "pnl_usdt", "reason", "pair_equity"],
@@ -221,6 +236,7 @@ def main():
             if set(st["grids"]) != set(PAIRS):
                 raise ValueError("coin list changed")
             log(f"resumed: hour {st['hours']}, equity {total_equity(st, prices):.2f}")
+            tg(status_report(st, prices, "📍 بوت الشبكة - الحالة الآن (رجع يشتغل بعد تحديث)"))
         except Exception as e:
             log(f"starting fresh ({e})")
             st = None
