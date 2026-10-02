@@ -20,7 +20,10 @@
     "use_order_book": true,
     "order_book_top": 1,
     "price_last_balance": 0.0,
-    "check_depth_of_market": { "enabled": false, "bids_to_ask_delta": 1 }
+    "check_depth_of_market": {
+      "enabled": false,
+      "bids_to_ask_delta": 1
+    }
   },
   "exit_pricing": {
     "price_side": "same",
@@ -34,14 +37,37 @@
     "ccxt_config": {},
     "ccxt_async_config": {},
     "pair_whitelist": [
-      "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
-      "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "LTC/USDT"
+      "BTC/USDT",
+      "ETH/USDT",
+      "SOL/USDT",
+      "BNB/USDT",
+      "XRP/USDT",
+      "DOGE/USDT",
+      "ADA/USDT",
+      "AVAX/USDT",
+      "LINK/USDT",
+      "LTC/USDT"
     ],
     "pair_blacklist": []
   },
-  "pairlists": [ { "method": "StaticPairList" } ],
-  "telegram": { "enabled": false, "token": "", "chat_id": "" },
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chat_id": "",
+    "notification_settings": {
+      "startup": "off",
+      "status": "off",
+      "warning": "on"
+    }
+  },
   "initial_state": "running",
   "force_entry_enable": false,
-  "internals": { "process_throttle_secs": 5 }
+  "internals": {
+    "process_throttle_secs": 5
+  }
 }

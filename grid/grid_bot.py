@@ -147,9 +147,9 @@ def learn(st, prices, now):
         if step_chg or money_chg:
             rebuild[p] = step
             if step_chg:
-                notes.append(f"{short(p)} step {st['steps'][p]*100:.2f}%→{step*100:.2f}%")
+                notes.append(f"{short(p)} الخطوة {st['steps'][p]*100:.2f}% ← {step*100:.2f}%")
             if money_chg:
-                notes.append(f"{short(p)} money {eq:.0f}→{targets[p]:.0f}")
+                notes.append(f"{short(p)} المبلغ {eq:.0f}$ ← {targets[p]:.0f}$")
     for p in rebuild:                                  # close virtual positions into the bank
         g = st["grids"][p]
         before = len(g.fills)
@@ -182,8 +182,13 @@ def learn(st, prices, now):
                 " ".join(f"{short(p)}:{weights[p]*100:.0f}%" for p in weights)])
     log(lesson)
     if TG_HOURLY:
-        tg(f"🧠 SalemGrid {lesson}\nequity {E:.2f}$ ({(E / st['start_capital'] - 1) * 100:+.2f}%), "
-           f"profitable hours {st['good_hours']}/{st['hours']}, refills {st['refills']}")
+        tg(f"🧠 بوت الشبكة - الساعة {st['hours']}\n"
+           f"الصفقات: {trades} | النتيجة: {hour_pnl:+.2f}$\n"
+           f"✅ الأفضل: {short(best)} {rets[best]:+.2f}%\n"
+           f"❌ الأسوأ: {short(worst)} {rets[worst]:+.2f}%\n"
+           f"🔧 التعديل: {'، '.join(notes) or 'ما فيه تعديل'}\n"
+           f"💰 الرصيد: {E:.2f}$ ({(E / st['start_capital'] - 1) * 100:+.2f}%) | "
+           f"ساعات رابحة {st['good_hours']} من {st['hours']} | مرات الشحن {st['refills']}")
     st["hour_t"] = now
     st["hour_eq"] = {p: g.equity(prices[p]) for p, g in st["grids"].items()}
     st["hour_E"] = total_equity(st, prices)    # after rebalancing fees; bank money included
@@ -222,8 +227,8 @@ def main():
     if st is None:
         st = fresh_state(prices, CAPITAL)
         log(f"started {CAPITAL:.0f} USDT on {len(PAIRS)} coins")
-        tg(f"🟢 SalemGrid started: virtual {CAPITAL:.0f}$ on {len(PAIRS)} coins. "
-           f"It learns from its own trades every hour.")
+        tg(f"🟢 بوت الشبكة اشتغل: {CAPITAL:.0f}$ وهمي على {len(PAIRS)} عملات. "
+           f"يتعلم من صفقاته ويعدل نفسه كل ساعة.")
     seen = {p: len(g.fills) for p, g in st["grids"].items()}
 
     while True:
@@ -242,7 +247,8 @@ def main():
                         st["hour_trades"][p] += 1
                         st["day_trades"] += 1
                     if TG_TRADES or reason == "stop":
-                        tg(f"{'⚠️ STOP ' if reason == 'stop' else ''}{side} {p} @ {fp:.4f} pnl {pnl:+.3f}")
+                        kind = "⚠️ وقف خسارة: بيع" if reason == "stop" else ("🟢 شراء" if side == "BUY" else "🔴 بيع")
+                        tg(f"{kind} {short(p)} بسعر {fp:.4f}" + (f" | النتيجة {pnl:+.3f}$" if side == "SELL" else ""))
                 seen[p] = len(g.fills)
 
             if now - st["hour_t"] >= LEARN_SECS:
@@ -253,8 +259,8 @@ def main():
             if E < st["start_capital"] * 0.1:              # balance gone -> refill and keep learning
                 st = fresh_state(prices, st["start_capital"], st["refills"] + 1)
                 seen = {p: len(g.fills) for p, g in st["grids"].items()}
-                tg(f"⚠️ SalemGrid balance ran out - refilled to {st['start_capital']:.0f}$ "
-                   f"(refill #{st['refills']})")
+                tg(f"⚠️ بوت الشبكة خسر رصيده - شحنته {st['start_capital']:.0f}$ من جديد "
+                   f"(الشحنة رقم {st['refills']})")
 
             today = datetime.now(RIYADH).date()
             if today != st["day"]:
@@ -263,7 +269,10 @@ def main():
                      f"({(E / st['start_capital'] - 1) * 100:+.2f}%), "
                      f"profitable hours {st['good_hours']}/{st['hours']}, refills {st['refills']}")
                 log(s)
-                tg(s)
+                tg(f"📊 ملخص يوم {st['day']} - بوت الشبكة\n"
+                   f"الصفقات: {st['day_trades']} | نتيجة اليوم: {E - st['day_eq']:+.2f}$\n"
+                   f"💰 الرصيد: {E:.2f}$ ({(E / st['start_capital'] - 1) * 100:+.2f}%)\n"
+                   f"ساعات رابحة {st['good_hours']} من {st['hours']} | مرات الشحن {st['refills']}")
                 st.update(day=today, day_eq=E, day_trades=0)
             save(st)
         except Exception:
