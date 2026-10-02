@@ -29,7 +29,7 @@ echo "=== MODE: $MODE | STRATEGY: $STRAT ==="
 if [ "$MODE" = "backtest" ]; then
   TR="${TIMERANGE:-20250101-}"
   freqtrade download-data -c "$CFG" --datadir "$DATA_DIR/data" -t 1h --timerange "$TR"
-  freqtrade backtesting -c "$CFG" --datadir "$DATA_DIR/data" -s "$STRAT" --timerange "$TR" --export none
+  freqtrade backtesting -c "$CFG" --datadir "$DATA_DIR/data" -s "$STRAT" --timerange "$TR" --export none --enable-protections
   echo "=== BACKTEST DONE - change MODE to dryrun when ready ==="
   sleep infinity
 elif [ "$MODE" = "dryrun" ]; then
