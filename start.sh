@@ -1,7 +1,7 @@
 #!/bin/bash
 # MODE: backtest | dryrun | live
 set -e
-MODE="${MODE:-backtest}"
+MODE="${MODE:-dryrun}"
 STRAT="${STRATEGY:-SalemTrend}"
 CFG=/freqtrade/user_data/config.json
 

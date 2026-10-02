@@ -20,7 +20,7 @@ SalemBot - Freqtrade on Railway
      MODE = backtest
    النتيجة تطلع في Deploy Logs. صوّرها وأرسلها لي.
 
-   المرحلة 2 - تداول وهمي (أسبوعين):
+   المرحلة 2 - تداول وهمي (أسبوعين) - هذا الوضع الافتراضي لو ما حطيت MODE:
      MODE = dryrun
      TG_TOKEN = توكن البوت من @BotFather
      TG_CHAT_ID = رقمك من @userinfobot
