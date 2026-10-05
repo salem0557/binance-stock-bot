@@ -19,6 +19,7 @@ from datetime import datetime, timezone, timedelta
 import ccxt
 import requests
 
+import chart
 from grid_core import Grid
 
 DATA = os.getenv("DATA_DIR", "/data")
@@ -40,6 +41,8 @@ STEP_MIN, STEP_MAX = 0.003, 0.015   # 0.3% is the smallest step that still beats
 W_MIN, W_MAX = 0.04, 0.20           # each coin gets 4%..20% of the money
 STOP_BELOW = 0.05                   # price 5% under the grid -> cut and re-centre lower
 REBUILD_DIFF = 0.25                 # rebuild a coin only if step or money changes > 25%
+CHART_SECS = 300                    # read every coin's chart every 5 minutes
+REGIME_AR = {"up": "صاعد", "down": "هابط", "side": "عرضي"}
 
 
 def log(msg):
@@ -72,8 +75,9 @@ def half_levels(alloc):
     return max(3, min(8, int(alloc / (2 * 6))))      # keep each order >= ~6 USDT
 
 
-def new_grid(alloc, price, step):
-    return Grid(alloc, price, step=step, half_levels=half_levels(alloc), stop_below=STOP_BELOW)
+def new_grid(alloc, price, step, pause=False):
+    return Grid(alloc, price, step=step, half_levels=half_levels(alloc), stop_below=STOP_BELOW,
+                pause_buys=pause)
 
 
 def fresh_state(prices, capital, refills=0):
@@ -84,7 +88,7 @@ def fresh_state(prices, capital, refills=0):
         "steps": {p: START_STEP for p in PAIRS},
         "scores": {p: 0.0 for p in PAIRS},
         "hist": {p: deque(maxlen=1500) for p in PAIRS},
-        "bank": 0.0, "start_capital": capital, "refills": refills,
+        "bank": 0.0, "start_capital": capital, "refills": refills, "chart": {}, "chart_t": 0,
         "hour_t": now, "hour_E": capital, "hour_eq": {p: each for p in PAIRS}, "hour_trades": {p: 0 for p in PAIRS},
         "hours": 0, "good_hours": 0,
         "day": datetime.now(RIYADH).date(), "day_eq": capital, "day_trades": 0,
@@ -126,7 +130,62 @@ def clamp_weights(raw):
     return {p: v / s for p, v in w.items()}
 
 
-def learn(st, prices, now):
+def add_coin(st, pair, alloc, price, info=None):
+    st["grids"][pair] = new_grid(alloc, price, START_STEP, pause=bool(info and info["regime"] == "down"))
+    st["steps"][pair] = START_STEP
+    st["scores"][pair] = 0.0
+    st["hist"][pair] = deque(maxlen=1500)
+    st["hour_trades"][pair] = 0
+    if info:
+        st.setdefault("chart", {})[pair] = info
+
+
+def scanner_swap(ex, st, prices, now):
+    """Swap the weakest coin for a much better grid coin from the market scan (max 1 per hour)."""
+    try:
+        ranked = chart.scan(ex)
+    except Exception as e:
+        log(f"scanner failed: {e}")
+        return None
+    held = set(st["grids"])
+    cands = [(p, i) for p, i in ranked if p not in held]
+    if not cands:
+        return None
+    best_p, best_i = cands[0]
+    worst = min(held, key=lambda p: st["scores"][p])
+    w_score = st.get("chart", {}).get(worst, {}).get("score", 0.0)
+    if st["scores"][worst] >= 0 or best_i["score"] < 1.5 * max(w_score, 0.01):
+        return None
+    g = st["grids"].pop(worst)
+    before = len(g.fills)
+    g._sell_all(prices[worst], now, "swap")
+    for f in g.fills[before:]:
+        record_fill(worst, f, g.cash)
+    st["bank"] += g.cash
+    for k in ("steps", "scores", "hist", "hour_trades", "hour_eq"):
+        st[k].pop(worst, None)
+    st.get("chart", {}).pop(worst, None)
+    alloc = min(st["bank"], total_equity(st, prices) * 0.10)
+    if alloc < 50:
+        return None
+    prices[best_p] = ex.fetch_ticker(best_p)["last"]
+    st["bank"] -= alloc
+    add_coin(st, best_p, alloc, prices[best_p], best_i)
+    return (f"{short(worst)} ← {short(best_p)} "
+            f"(تذبذب {best_i['score']:.2f} مقابل {w_score:.2f})")
+
+
+def chart_summary(st):
+    ch = st.get("chart", {})
+    groups = {"up": [], "down": [], "side": []}
+    for p in st["grids"]:
+        if p in ch:
+            groups[ch[p]["regime"]].append(short(p))
+    parts = [f"{REGIME_AR[k]}: {' '.join(v)}" for k, v in groups.items() if v]
+    return " | ".join(parts) or "ما انقرأ بعد"
+
+
+def learn(st, prices, now, ex=None):
     E = total_equity(st, prices)
     rets, notes = {}, []
     for p, g in st["grids"].items():
@@ -163,8 +222,11 @@ def learn(st, prices, now):
     for p, step in rebuild.items():
         alloc = targets[p] * scale
         st["bank"] -= alloc
-        st["grids"][p] = new_grid(alloc, prices[p], step)
+        down = st.get("chart", {}).get(p, {}).get("regime") == "down"
+        st["grids"][p] = new_grid(alloc, prices[p], step, pause=down)
         st["steps"][p] = step
+
+    swap = scanner_swap(ex, st, prices, now) if ex is not None else None
 
     hour_pnl = E - st["hour_E"]
     trades = sum(st["hour_trades"].values())
@@ -173,7 +235,8 @@ def learn(st, prices, now):
     best = max(rets, key=rets.get)
     worst = min(rets, key=rets.get)
     lesson = (f"hour {st['hours']}: {trades} trades, {hour_pnl:+.2f}$ | best {short(best)} {rets[best]:+.2f}% "
-              f"| worst {short(worst)} {rets[worst]:+.2f}% | changes: {', '.join(notes) or 'none'}")
+              f"| worst {short(worst)} {rets[worst]:+.2f}% | changes: {', '.join(notes) or 'none'}"
+              f" | chart: {chart_summary(st)} | scanner: {swap or 'no swap'}")
     append_csv(LESSONS, ["time", "hour", "trades", "hour_pnl", "equity", "best", "worst", "changes",
                          "weights"],
                [datetime.now(RIYADH).isoformat(timespec="seconds"), st["hours"], trades,
@@ -187,6 +250,8 @@ def learn(st, prices, now):
            f"✅ الأفضل: {short(best)} {rets[best]:+.2f}%\n"
            f"❌ الأسوأ: {short(worst)} {rets[worst]:+.2f}%\n"
            f"🔧 التعديل: {'، '.join(notes) or 'ما فيه تعديل'}\n"
+           f"📈 التشارت: {chart_summary(st)}\n"
+           f"🔎 الماسح: {('بدّلت ' + swap) if swap else 'ما فيه عملة أفضل'}\n"
            f"💰 الرصيد: {E:.2f}$ ({(E / st['start_capital'] - 1) * 100:+.2f}%) | "
            f"ساعات رابحة {st['good_hours']} من {st['hours']}")
     st["hour_t"] = now
@@ -206,6 +271,7 @@ def status_report(st, prices):
             f"✅ الأفضل: {short(best)} {rets[best]:+.2f}%\n"
             f"❌ الأسوأ: {short(worst)} {rets[worst]:+.2f}%\n"
             f"🔧 التعديل: ما فيه تعديل\n"
+            f"📈 التشارت: {chart_summary(st)}\n"
             f"💰 الرصيد: {E:.2f}$ ({(E / st['start_capital'] - 1) * 100:+.2f}%) | "
             f"ساعات رابحة {st['good_hours']} من {st['hours']}")
 
@@ -227,14 +293,19 @@ def save(st):
 def main():
     os.makedirs(DATA, exist_ok=True)
     ex = ccxt.binance({"enableRateLimit": True})
-    prices = {p: t["last"] for p, t in ex.fetch_tickers(PAIRS).items() if p in PAIRS}
-
     st = None
     if os.path.exists(STATE):
         try:
             st = pickle.load(open(STATE, "rb"))
-            if set(st["grids"]) != set(PAIRS):
-                raise ValueError("coin list changed")
+            st.setdefault("chart", {})
+            st.setdefault("chart_t", 0)
+        except Exception as e:
+            log(f"starting fresh ({e})")
+            st = None
+    coins = list(st["grids"]) if st else PAIRS
+    prices = {p: t["last"] for p, t in ex.fetch_tickers(coins).items() if p in coins}
+    if st is not None:
+        try:
             log(f"resumed: hour {st['hours']}, equity {total_equity(st, prices):.2f}")
             tg(status_report(st, prices))
         except Exception as e:
@@ -250,25 +321,44 @@ def main():
     while True:
         try:
             now = time.time()
-            tick = ex.fetch_tickers(PAIRS)
+            tick = ex.fetch_tickers(list(st["grids"]))
             for p, g in st["grids"].items():
                 price = tick[p]["last"]
                 prices[p] = price
                 st["hist"][p].append((now, price))
                 g.on_price(price, now)
+                stop_pnl, stop_px = None, 0.0
                 for fill in g.fills[seen[p]:]:
                     record_fill(p, fill, g.equity(price))
                     _, side, fp, qty, pnl, reason = fill
                     if side == "SELL" and reason == "grid":
                         st["hour_trades"][p] += 1
                         st["day_trades"] += 1
-                    if TG_TRADES or reason == "stop":
-                        kind = "⚠️ وقف خسارة: بيع" if reason == "stop" else ("🟢 شراء" if side == "BUY" else "🔴 بيع")
+                    if reason == "stop":                       # one message per stop, not per level
+                        stop_pnl, stop_px = (stop_pnl or 0.0) + pnl, fp
+                    elif TG_TRADES and reason in ("grid", "setup"):
+                        kind = "🟢 شراء" if side == "BUY" else "🔴 بيع"
                         tg(f"{kind} {short(p)} بسعر {fp:.4f}" + (f" | النتيجة {pnl:+.3f}$" if side == "SELL" else ""))
+                if stop_pnl is not None:
+                    tg(f"⚠️ وقف خسارة: {short(p)} نزل تحت الشبكة، بعت الكمية عند {stop_px:.4f} "
+                       f"| الخسارة {stop_pnl:+.2f}$ | رجّعت الشبكة تحت السعر الجديد")
                 seen[p] = len(g.fills)
 
+            if now - st.get("chart_t", 0) >= CHART_SECS:      # read the charts
+                st["chart_t"] = now
+                for p, g in st["grids"].items():
+                    try:
+                        info = chart.read_chart(ex, p)
+                    except Exception:
+                        continue
+                    old = st["chart"].get(p, {}).get("regime")
+                    st["chart"][p] = info
+                    g.pause_buys = info["regime"] == "down"
+                    if old and old != info["regime"]:
+                        log(f"chart {p}: {old} -> {info['regime']} (4h {info['chg4h']*100:+.2f}%)")
+
             if now - st["hour_t"] >= LEARN_SECS:
-                learn(st, prices, now)
+                learn(st, prices, now, ex)
                 seen = {p: len(g.fills) for p, g in st["grids"].items()}
 
             E = total_equity(st, prices)

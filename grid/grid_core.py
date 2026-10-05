@@ -14,9 +14,11 @@ MIN_ORDER = 5.0  # Binance minimum order value (USDT)
 
 
 class Grid:
+    pause_buys = False   # set by the chart reader when the coin is in a clear downtrend
     def __init__(self, capital, price, step=0.008, half_levels=8, fee=0.001,
-                 stop_below=0.06, now=None):
+                 stop_below=0.06, now=None, pause_buys=False):
         self.step, self.half, self.fee, self.stop_below = step, half_levels, fee, stop_below
+        self.pause_buys = pause_buys
         self.cash = capital
         self.bags = {}       # level index -> coin qty waiting to be sold at that level
         self.fills = []      # (ts, side, price, qty, pnl, reason)
@@ -38,6 +40,8 @@ class Grid:
         self.slice = self.equity(price) / n
         # (always called with no coins held: at start, after a sell-out or a stop)
         for j in range(self.ptr + 1, n + 1):
+            if self.pause_buys:                    # downtrend: start with cash only
+                break
             amt = min(self.slice, self.cash)
             if amt < MIN_ORDER:
                 break
@@ -57,7 +61,7 @@ class Grid:
     def on_price(self, price, now):
         n = 2 * self.half
         # buys: price at or below the next level down
-        while self.ptr > 0 and price <= self.levels[self.ptr - 1]:
+        while not self.pause_buys and self.ptr > 0 and price <= self.levels[self.ptr - 1]:
             lv = self.levels[self.ptr - 1]
             if self.cash < max(MIN_ORDER, self.slice * 0.999):
                 break
