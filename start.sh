@@ -34,9 +34,9 @@ if [ "$MODE" = "backtest" ]; then
   echo "=== BACKTEST DONE - change MODE to dryrun when ready ==="
   sleep infinity
 elif [ "$MODE" = "dryrun" ]; then
-  # Virtual grid bot runs next to the main bot (set GRID=off to disable)
+  # Virtual momentum hunter runs next to the main bot (set GRID=off to disable)
   if [ "${GRID:-on}" != "off" ]; then
-    ( cd /freqtrade/grid && while true; do DATA_DIR="$DATA_DIR" python3 grid_bot.py; sleep 30; done ) &
+    ( cd /freqtrade/grid && while true; do DATA_DIR="$DATA_DIR" python3 pump_bot.py; sleep 30; done ) &
   fi
   exec freqtrade trade -c "$CFG" -c /tmp/secrets.json -s "$STRAT" \
     --datadir "$DATA_DIR/data" --db-url "sqlite:///$DATA_DIR/dryrun.sqlite" --dry-run
