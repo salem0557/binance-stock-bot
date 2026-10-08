@@ -34,12 +34,19 @@ if [ "$MODE" = "backtest" ]; then
   echo "=== BACKTEST DONE - change MODE to dryrun when ready ==="
   sleep infinity
 elif [ "$MODE" = "dryrun" ]; then
-  # Virtual momentum hunter runs next to the main bot (set GRID=off to disable)
-  if [ "${GRID:-on}" != "off" ]; then
-    ( cd /freqtrade/grid && while true; do DATA_DIR="$DATA_DIR" python3 pump_bot.py; sleep 30; done ) &
+  # SalemTrend (paper) is off unless SALEMTREND=on. The momentum hunter (pump_bot) runs unless GRID=off.
+  if [ "${SALEMTREND:-off}" = "on" ]; then
+    if [ "${GRID:-on}" != "off" ]; then
+      ( cd /freqtrade/grid && while true; do DATA_DIR="$DATA_DIR" python3 pump_bot.py; sleep 30; done ) &
+    fi
+    exec freqtrade trade -c "$CFG" -c /tmp/secrets.json -s "$STRAT" \
+      --datadir "$DATA_DIR/data" --db-url "sqlite:///$DATA_DIR/dryrun.sqlite" --dry-run
   fi
-  exec freqtrade trade -c "$CFG" -c /tmp/secrets.json -s "$STRAT" \
-    --datadir "$DATA_DIR/data" --db-url "sqlite:///$DATA_DIR/dryrun.sqlite" --dry-run
+  if [ "${GRID:-on}" = "off" ]; then
+    echo "Both bots are off (SALEMTREND not on, GRID=off)"; sleep infinity
+  fi
+  cd /freqtrade/grid
+  while true; do DATA_DIR="$DATA_DIR" python3 pump_bot.py; echo "pump_bot exited, restarting in 30s"; sleep 30; done
 elif [ "$MODE" = "live" ]; then
   export FREQTRADE__DRY_RUN=false
   exec freqtrade trade -c "$CFG" -c /tmp/secrets.json -s "$STRAT" \
