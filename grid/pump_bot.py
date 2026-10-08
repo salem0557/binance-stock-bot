@@ -1,6 +1,7 @@
 """SalemPump - momentum hunter: catches coins at the start of an explosive move and rides the
 wave with a trailing stop. Runs on paper (virtual money) or LIVE on the owner's Binance spot account.
 
+Only a fixed list of ~30 large, established coins is traded (no small caps / meme coins).
 Every SCAN_SECS:
   1. one ticker call for all USDT coins; remember each coin's price for the last 30 minutes
   2. coins up >= 2.5% in 15 minutes become candidates -> read their 5m chart
@@ -30,7 +31,6 @@ from datetime import datetime, timezone, timedelta
 import ccxt
 import requests
 
-from chart import STABLE
 
 DATA = os.getenv("DATA_DIR", "/data")
 STATE = os.path.join(DATA, "pump_state.pkl")
@@ -44,7 +44,11 @@ TG_HOURLY = os.getenv("PUMP_TG_HOURLY", "on") == "on"
 RIYADH = timezone(timedelta(hours=3))
 
 SCAN_SECS, WATCH_SECS = 30, 5
-MIN_VOL_24H = 5_000_000          # USDT traded in 24h
+MIN_VOL_24H = 20_000_000         # USDT traded in 24h
+# Only large, established coins - no small caps, no new listings, no meme coins except DOGE
+LARGE = {"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK", "DOT", "TON",
+         "LTC", "BCH", "XLM", "SUI", "NEAR", "APT", "UNI", "ICP", "ETC", "HBAR", "FIL", "ATOM",
+         "ARB", "OP", "AAVE", "INJ", "TAO", "ENA"}
 MOVE_15M = 0.025                 # +2.5% in 15 minutes -> candidate
 VOL_SPIKE = 4.0                  # last 5m volume vs 2h average
 MAX_24H = 0.40                   # skip if already +40% in 24h (too late)
@@ -159,7 +163,7 @@ def usdt_pairs(tickers):
         if not sym.endswith("/USDT") or ":" in sym:
             continue
         base = sym.split("/")[0]
-        if base in STABLE or base.endswith(("UP", "DOWN", "BULL", "BEAR")):
+        if base not in LARGE:
             continue
         if (t.get("quoteVolume") or 0) >= MIN_VOL_24H and (t.get("last") or 0) > 0:
             out[sym] = t
