@@ -1,7 +1,10 @@
 """SalemPump - momentum hunter: catches coins at the start of an explosive move and rides the
 wave with a trailing stop. Runs on paper (virtual money) or LIVE on the owner's Binance spot account.
 
-Only a fixed list of ~30 large, established coins is traded (no small caps / meme coins).
+Scans every liquid USDT coin (24h volume >= 10M). Protections:
+  - large coins (whitelist) get 25 USDT per trade, small coins 10 USDT, max 1 small coin open
+  - skip coins whose bid/ask spread is wider than 0.3%
+  - daily loss limit: after -5 USDT realized in a Riyadh day, no new entries until tomorrow
 Every SCAN_SECS:
   1. one ticker call for all USDT coins; remember each coin's price for the last 30 minutes
   2. coins up >= 2.5% in 15 minutes become candidates -> read their 5m chart
@@ -31,6 +34,8 @@ from datetime import datetime, timezone, timedelta
 import ccxt
 import requests
 
+from chart import STABLE
+
 
 DATA = os.getenv("DATA_DIR", "/data")
 STATE = os.path.join(DATA, "pump_state.pkl")
@@ -44,8 +49,8 @@ TG_HOURLY = os.getenv("PUMP_TG_HOURLY", "on") == "on"
 RIYADH = timezone(timedelta(hours=3))
 
 SCAN_SECS, WATCH_SECS = 30, 5
-MIN_VOL_24H = 20_000_000         # USDT traded in 24h
-# Only large, established coins - no small caps, no new listings, no meme coins except DOGE
+MIN_VOL_24H = 10_000_000         # USDT traded in 24h
+# Large, established coins get the full stake; everything else counts as a small coin
 LARGE = {"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK", "DOT", "TON",
          "LTC", "BCH", "XLM", "SUI", "NEAR", "APT", "UNI", "ICP", "ETC", "HBAR", "FIL", "ATOM",
          "ARB", "OP", "AAVE", "INJ", "TAO", "ENA"}
@@ -55,6 +60,10 @@ MAX_24H = 0.40                   # skip if already +40% in 24h (too late)
 BTC_DUMP = -0.015                # skip entries if BTC fell more than 1.5% in 1h
 MAX_OPEN = 2                     # 2 trades of half the capital each
 MIN_STAKE = 10                   # Binance minimum order is ~5 USDT; keep a margin
+STAKE_LARGE, STAKE_SMALL = 25, 10
+MAX_SMALL_OPEN = 1
+MAX_SPREAD = 0.003               # skip if bid/ask spread > 0.3%
+DAY_LOSS_LIMIT = 5.0             # stop new entries for the day after -5 USDT realized
 FEE, SLIP = 0.001, 0.002         # paper only: 0.1% fee each side, 0.2% slippage
 HARD_STOP = 0.04
 TRAIL_START, TRAIL_1, TRAIL_BIG, TRAIL_2 = 0.04, 0.04, 0.10, 0.06
@@ -163,7 +172,7 @@ def usdt_pairs(tickers):
         if not sym.endswith("/USDT") or ":" in sym:
             continue
         base = sym.split("/")[0]
-        if base not in LARGE:
+        if base in STABLE or base.endswith(("UP", "DOWN", "BULL", "BEAR")):
             continue
         if (t.get("quoteVolume") or 0) >= MIN_VOL_24H and (t.get("last") or 0) > 0:
             out[sym] = t
@@ -266,6 +275,14 @@ def scan(ex, st, tickers, now):
         h.append((now, t["last"]))
     if st.get("paused"):
         return
+    today = datetime.now(RIYADH).date()
+    day_pnl = sum(c["pnl"] for c in st["closed"] if datetime.fromtimestamp(c["t"], RIYADH).date() == today)
+    if day_pnl <= -DAY_LOSS_LIMIT:
+        if st.get("day_stop") != today:
+            st["day_stop"] = today
+            tg(f"🛑 {tag(st)} خسارة اليوم وصلت {day_pnl:.2f}$، وقفت الدخول لين بكرا. "
+               f"الصفقات المفتوحة تكمل لين تقفل.")
+        return
     btc = st["seen"].get("BTC/USDT")
     old_btc = price_ago(btc, now, 3600) if btc else None
     btc_1h = tickers["BTC/USDT"]["last"] / old_btc - 1 if old_btc else 0
@@ -284,13 +301,23 @@ def scan(ex, st, tickers, now):
     for move, sym, t in sorted(cands, reverse=True)[:5]:
         if len(st["open"]) >= MAX_OPEN:
             break
+        small = short(sym) not in LARGE
+        if small and sum(1 for p in st["open"] if short(p) not in LARGE) >= MAX_SMALL_OPEN:
+            continue
         try:
             ok = confirm(ex, sym, t)
+            if ok:
+                ob = ex.fetch_order_book(sym, limit=5)
+                bid, ask = ob["bids"][0][0], ob["asks"][0][0]
+                ok["spread"] = (ask - bid) / ((ask + bid) / 2)
+                if ok["spread"] > MAX_SPREAD:
+                    log(f"skip {sym}: spread {ok['spread'] * 100:.2f}%")
+                    ok = None
         except Exception:
             continue
         if not ok:
             continue
-        stake = min(st["cash"], st["start_capital"] / MAX_OPEN)
+        stake = min(st["cash"], STAKE_SMALL if small else STAKE_LARGE)
         if stake < MIN_STAKE:
             break
         try:
@@ -303,7 +330,8 @@ def scan(ex, st, tickers, now):
         st["open"][sym] = {"t": now, "entry": entry, "qty": qty, "cost": spent, "peak": entry}
         msg = (f"🚀 {tag(st)} دخول {short(sym)} بسعر {entry:.6g} | المبلغ {spent:.2f}$\n"
                f"طلعت {move * 100:+.1f}% في 15 دقيقة | الحجم {ok['spike']:.0f}× المعتاد | "
-               f"كسرت قمة الساعتين | 24 ساعة {(t.get('percentage') or 0):+.1f}%")
+               f"كسرت قمة الساعتين | 24 ساعة {(t.get('percentage') or 0):+.1f}%\n"
+               f"{'🔸 عملة صغيرة' if small else '🔹 عملة كبيرة'} | السبريد {ok['spread'] * 100:.2f}%")
         log(msg.replace("\n", " | "))
         tg(msg)
 
