@@ -415,6 +415,18 @@ def main():
         tg(f"🟢 صياد الانفجارات اشتغل {tag(st)} برصيد {CAPITAL:.0f}$. يراقب كل عملات Binance "
            f"كل 30 ثانية ويدخل أول ما تبدأ عملة تنفجر.")
 
+    if st["live"]:                                  # prove the key works and the money is there
+        try:
+            free = ex.fetch_balance()["free"].get("USDT", 0) or 0
+            ok = free >= min(st["cash"], STAKE_LARGE)
+            log(f"live balance check: {free:.2f} USDT free")
+            tg(f"{'✅' if ok else '⚠️'} {tag(st)} اتصلت بحسابك في Binance. الرصيد المتاح: {free:.2f} USDT\n"
+               + (f"البوت يتداول بـ {st['start_capital']:.0f}$ بس من هذا المبلغ." if ok
+                  else f"الرصيد أقل من المطلوب، اشحن USDT في Spot Wallet عشان يقدر يدخل صفقات."))
+        except Exception as e:
+            log(f"live balance check failed: {e}")
+            tg(f"❌ {tag(st)} ما قدرت أتصل بحسابك في Binance: {str(e)[:200]}\n"
+               f"تأكد من المفتاح وإن فيه صلاحية Spot Trading.")
     prices, last_scan = {}, 0.0
     while True:
         try:
