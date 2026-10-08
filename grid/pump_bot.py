@@ -10,8 +10,11 @@ Exits (checked every 5 seconds):
   - hard stop -4% from entry
   - trailing stop: after +4% follow 4% under the peak; after +10% follow 6% under the peak
   - failed breakout: after 45 minutes still under +1% -> out
-Each trade uses 10% of the balance (max 5 at once). Refills to the start balance if it runs out.
-Railway variables (optional): PUMP_CAPITAL (2000), PUMP_TG_HOURLY (on), GRID=off disables it.
+  - no wave after 2 hours (never reached +4%) -> out
+Trading balance is capped at PUMP_CAPITAL: every realized profit above it is moved out to
+"withdrawn" (as if the owner took it). Each trade uses 20% of the capital (max 5 at once).
+Refills to the start balance if it runs out.
+Railway variables (optional): PUMP_CAPITAL (200), PUMP_TG_HOURLY (on), GRID=off disables it.
 """
 import csv, os, pickle, time, traceback
 from collections import deque
@@ -25,7 +28,7 @@ from chart import STABLE
 DATA = os.getenv("DATA_DIR", "/data")
 STATE = os.path.join(DATA, "pump_state.pkl")
 TRADES = os.path.join(DATA, "pump_trades.csv")
-CAPITAL = float(os.getenv("PUMP_CAPITAL", "2000"))
+CAPITAL = float(os.getenv("PUMP_CAPITAL", "200"))
 TG_TOKEN, TG_CHAT = os.getenv("TG_TOKEN", ""), os.getenv("TG_CHAT_ID", "")
 TG_HOURLY = os.getenv("PUMP_TG_HOURLY", "on") == "on"
 RIYADH = timezone(timedelta(hours=3))
@@ -36,12 +39,13 @@ MOVE_15M = 0.025                 # +2.5% in 15 minutes -> candidate
 VOL_SPIKE = 4.0                  # last 5m volume vs 2h average
 MAX_24H = 0.40                   # skip if already +40% in 24h (too late)
 BTC_DUMP = -0.015                # skip entries if BTC fell more than 1.5% in 1h
-SLOT = 0.10                      # 10% of balance per trade
+SLOT = 0.20                      # 20% of the capital per trade
 MAX_OPEN = 5
 FEE, SLIP = 0.001, 0.002         # 0.1% fee each side, 0.2% slippage on fast moves
 HARD_STOP = 0.04
 TRAIL_START, TRAIL_1, TRAIL_BIG, TRAIL_2 = 0.04, 0.04, 0.10, 0.06
 FAIL_MINS, FAIL_MIN_GAIN = 45, 0.01
+MAX_HOLD_MINS = 120              # no wave (+4%) after 2 hours -> out
 COOLDOWN = 6 * 3600
 
 
@@ -64,13 +68,24 @@ def short(p):
 
 def fresh_state(capital, refills=0):
     now = time.time()
-    return {"cash": capital, "start_capital": capital, "refills": refills, "open": {},
+    return {"cash": capital, "start_capital": capital, "refills": refills, "open": {}, "withdrawn": 0.0,
             "closed": [], "cooldown": {}, "seen": {}, "hour_t": now, "hour_eq": capital,
             "hours": 0, "good_hours": 0, "day": datetime.now(RIYADH).date(), "day_eq": capital}
 
 
 def equity(st, prices):
     return st["cash"] + sum(t["qty"] * prices.get(p, t["entry"]) for p, t in st["open"].items())
+
+
+def sweep(st):
+    """Move realized profit above the capital out of trading (as if withdrawn)."""
+    book = st["cash"] + sum(t["cost"] for t in st["open"].values())
+    extra = book - st["start_capital"]
+    if extra > 0.005:
+        st["cash"] -= extra
+        st["withdrawn"] = st.get("withdrawn", 0.0) + extra
+        return extra
+    return 0.0
 
 
 def usdt_pairs(tickers):
@@ -132,11 +147,14 @@ def close(st, p, px, now, reason):
             f"{t['entry']:.8g}", f"{exit_px:.8g}", f"{(t['peak'] / t['entry'] - 1) * 100:.2f}",
             f"{pnl:.2f}", f"{pct:.2f}", f"{mins:.0f}", reason])
     why = {"stop": "وقف الخسارة -4%", "trail": "الوقف المتحرك (الموجة رجعت)",
-           "failed": "الانفجار ما كمّل خلال 45 دقيقة"}[reason]
+           "failed": "الانفجار ما كمّل خلال 45 دقيقة", "timeout": "ما جت موجة خلال ساعتين",
+           "reset": "تغيير الرصيد"}[reason]
+    took = sweep(st)
     icon = "✅" if pnl > 0 else "❌"
     msg = (f"{icon} خروج {short(p)} | {pct:+.2f}% ({pnl:+.2f}$)\n"
            f"دخول {t['entry']:.6g} ← خروج {exit_px:.6g} | أعلى نقطة {(t['peak'] / t['entry'] - 1) * 100:+.1f}%\n"
-           f"المدة {mins:.0f} دقيقة | السبب: {why}")
+           f"المدة {mins:.0f} دقيقة | السبب: {why}"
+           + (f"\n💵 سحبت الربح {took:.2f}$ برا الصفقات (المجموع {st['withdrawn']:.2f}$)" if took else ""))
     log(msg.replace("\n", " | "))
     tg(msg)
 
@@ -157,6 +175,8 @@ def manage(st, prices, now):
                 close(st, p, px, now, "trail")
         elif now - t["t"] >= FAIL_MINS * 60 and gain < FAIL_MIN_GAIN:
             close(st, p, px, now, "failed")
+        elif now - t["t"] >= MAX_HOLD_MINS * 60:
+            close(st, p, px, now, "timeout")
 
 
 def scan(ex, st, tickers, now):
@@ -187,8 +207,8 @@ def scan(ex, st, tickers, now):
             continue
         if not ok:
             continue
-        stake = min(st["cash"], equity(st, {}) * SLOT)
-        if stake < 20:
+        stake = min(st["cash"], st["start_capital"] * SLOT)
+        if stake < 10:
             break
         entry = t["last"] * (1 + SLIP)
         qty = stake / entry * (1 - FEE)
@@ -215,8 +235,8 @@ def hourly(st, prices, now):
             f"صفقات مقفولة: {len(hour_trades)} | النتيجة: {pnl:+.2f}$\n"
             f"📂 مفتوحة الحين: {opened}\n"
             f"🎯 نسبة الفوز: {wins} من {len(allc)}\n"
-            f"💰 الرصيد: {E:.2f}$ ({(E / st['start_capital'] - 1) * 100:+.2f}%) | "
-            f"ساعات رابحة {st['good_hours']} من {st['hours']}")
+            f"💰 رصيد التداول: {E:.2f}$ من {st['start_capital']:.0f}$\n"
+            f"💵 المسحوب (الربح): {st.get('withdrawn', 0):.2f}$ | ساعات رابحة {st['good_hours']} من {st['hours']}")
     log(line.replace("\n", " | "))
     if TG_HOURLY:
         tg(line)
@@ -246,6 +266,17 @@ def main():
         tg(f"🟢 صياد الانفجارات اشتغل: {CAPITAL:.0f}$ وهمي. يراقب كل عملات Binance كل 30 ثانية "
            f"ويدخل أول ما تبدأ عملة تنفجر.")
     prices, last_scan = {}, 0.0
+    if st.get("start_capital") != CAPITAL:
+        old_cap = st["start_capital"]
+        tk = ex.fetch_tickers(list(st["open"])) if st["open"] else {}
+        for p in list(st["open"]):
+            close(st, p, tk[p]["last"], time.time(), "reset")
+        old_eq = st["cash"] + st.get("withdrawn", 0.0)
+        st = fresh_state(CAPITAL)
+        log(f"capital changed {old_cap:.0f} -> {CAPITAL:.0f} (old run ended at {old_eq:.2f})")
+        tg(f"🔄 صياد الانفجارات: الرصيد صار {CAPITAL:.0f}$\n"
+           f"التجربة السابقة ({old_cap:.0f}$) خلصت عند {old_eq:.2f}$ ({old_eq - old_cap:+.2f}$)\n"
+           f"من الحين: أي ربح يطلع من الصفقات أسحبه برا وما يرجع للتداول.")
     while True:
         try:
             now = time.time()
@@ -273,8 +304,8 @@ def main():
                 wins = sum(1 for c in day if c["pnl"] > 0)
                 s = (f"📊 ملخص يوم {st['day']} - صياد الانفجارات\n"
                      f"الصفقات: {len(day)} | الرابحة: {wins} | نتيجة اليوم: {E - st['day_eq']:+.2f}$\n"
-                     f"💰 الرصيد: {E:.2f}$ ({(E / st['start_capital'] - 1) * 100:+.2f}%) | "
-                     f"مرات الشحن {st['refills']}")
+                     f"💰 رصيد التداول: {E:.2f}$ من {st['start_capital']:.0f}$ | "
+                     f"💵 المسحوب: {st.get('withdrawn', 0):.2f}$ | مرات الشحن {st['refills']}")
                 log(s.replace("\n", " | "))
                 tg(s)
                 st.update(day=today, day_eq=E)
