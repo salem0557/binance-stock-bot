@@ -9,10 +9,10 @@ Every SCAN_SECS:
   1. one ticker call for all USDT coins; remember each coin's price for the last 30 minutes
   2. coins up >= 2.5% in 15 minutes become candidates -> read their 5m chart
   3. ENTER if: last 5m volume >= 4x the 2-hour average, price breaks the 2-hour high,
-     not already up > 40% in 24h, and Bitcoin is not dumping (> -1.5% in 1h)
+     the 15m move is under 6% and the 24h move under 18% (not late), and Bitcoin is not dumping
 Exits (checked every 5 seconds):
   - hard stop -4% from entry
-  - trailing stop: after +4% follow 4% under the peak; after +10% follow 6% under the peak
+  - trailing stop after +4%: 2.5% under the peak (peak +4..7%), 4% (peak +7..10%), 6% (peak +10%+)
   - failed breakout: after 45 minutes still under +1% -> out
   - no wave after 2 hours (never reached +4%) -> out
 
@@ -56,7 +56,8 @@ LARGE = {"BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LINK"
          "ARB", "OP", "AAVE", "INJ", "TAO", "ENA"}
 MOVE_15M = 0.025                 # +2.5% in 15 minutes -> candidate
 VOL_SPIKE = 4.0                  # last 5m volume vs 2h average
-MAX_24H = 0.40                   # skip if already +40% in 24h (too late)
+MAX_24H = 0.18                   # skip if already +18% in 24h (too late) - from live data
+MAX_MOVE_15M = 0.06              # skip if already +6% in 15m (chasing) - from live data
 BTC_DUMP = -0.015                # skip entries if BTC fell more than 1.5% in 1h
 MAX_OPEN = 2                     # 2 trades of half the capital each
 MIN_STAKE = 10                   # Binance minimum order is ~5 USDT; keep a margin
@@ -66,7 +67,9 @@ MAX_SPREAD = 0.003               # skip if bid/ask spread > 0.3%
 DAY_LOSS_LIMIT = 5.0             # stop new entries for the day after -5 USDT realized
 FEE, SLIP = 0.001, 0.002         # paper only: 0.1% fee each side, 0.2% slippage
 HARD_STOP = 0.04
-TRAIL_START, TRAIL_1, TRAIL_BIG, TRAIL_2 = 0.04, 0.04, 0.10, 0.06
+TRAIL_START = 0.04
+# trailing distance by how high the trade has gone: lock gains on small waves, room for big ones
+TRAILS = [(0.10, 0.06), (0.07, 0.04), (0.04, 0.025)]   # (peak gain >=, give back from the peak)
 FAIL_MINS, FAIL_MIN_GAIN = 45, 0.01
 MAX_HOLD_MINS = 120              # no wave (+4%) after 2 hours -> out
 COOLDOWN = 6 * 3600
@@ -259,7 +262,7 @@ def manage(ex, st, prices, now):
         if gain <= -HARD_STOP:
             close(ex, st, p, px, now, "stop")
         elif gain_peak >= TRAIL_START:
-            trail = TRAIL_2 if gain_peak >= TRAIL_BIG else TRAIL_1
+            trail = next(tr for lvl, tr in TRAILS if gain_peak >= lvl)
             if px <= t["peak"] * (1 - trail):
                 close(ex, st, p, px, now, "trail")
         elif now - t["t"] >= FAIL_MINS * 60 and gain < FAIL_MIN_GAIN:
@@ -296,7 +299,7 @@ def scan(ex, st, tickers, now):
         if not old or now - st["seen"][sym][0][0] < 840:      # need ~15 min of memory
             continue
         move = t["last"] / old - 1
-        if move >= MOVE_15M and (t.get("percentage") or 0) / 100 < MAX_24H:
+        if MOVE_15M <= move < MAX_MOVE_15M and (t.get("percentage") or 0) / 100 < MAX_24H:
             cands.append((move, sym, t))
     for move, sym, t in sorted(cands, reverse=True)[:5]:
         if len(st["open"]) >= MAX_OPEN:
