@@ -70,6 +70,7 @@ HARD_STOP = 0.04
 TRAIL_START = 0.04
 # trailing distance by how high the trade has gone: lock gains on small waves, room for big ones
 TRAILS = [(0.10, 0.06), (0.07, 0.04), (0.04, 0.025)]   # (peak gain >=, give back from the peak)
+LOCK_FROM, LOCK_SHARE = 0.10, 0.80     # from +10% peak gain, never give back more than 20% of it
 FAIL_MINS, FAIL_MIN_GAIN = 45, 0.01
 MAX_HOLD_MINS = 120              # no wave (+4%) after 2 hours -> out
 COOLDOWN = 6 * 3600
@@ -263,7 +264,10 @@ def manage(ex, st, prices, now):
             close(ex, st, p, px, now, "stop")
         elif gain_peak >= TRAIL_START:
             trail = next(tr for lvl, tr in TRAILS if gain_peak >= lvl)
-            if px <= t["peak"] * (1 - trail):
+            stop = t["peak"] * (1 - trail)
+            if gain_peak >= LOCK_FROM:                 # big wave: keep at least 80% of the best gain
+                stop = max(stop, t["entry"] * (1 + gain_peak * LOCK_SHARE))
+            if px <= stop:
                 close(ex, st, p, px, now, "trail")
         elif now - t["t"] >= FAIL_MINS * 60 and gain < FAIL_MIN_GAIN:
             close(ex, st, p, px, now, "failed")
