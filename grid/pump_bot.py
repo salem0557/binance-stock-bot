@@ -106,12 +106,17 @@ def fresh_state(capital, live, refills=0):
             "day": datetime.now(RIYADH).date(), "day_eq": capital}
 
 
+def bot_open(st):
+    """Positions the bot opened itself (not the owner's manual buys it only manages)."""
+    return {p: t for p, t in st["open"].items() if not t.get("manual")}
+
+
 def equity(st, prices):
-    return st["cash"] + sum(t["qty"] * prices.get(p, t["entry"]) for p, t in st["open"].items())
+    return st["cash"] + sum(t["qty"] * prices.get(p, t["entry"]) for p, t in bot_open(st).items())
 
 
 def book(st):
-    return st["cash"] + sum(t["cost"] for t in st["open"].values())
+    return st["cash"] + sum(t["cost"] for t in bot_open(st).values())
 
 
 def sweep(st):
@@ -230,19 +235,24 @@ def close(ex, st, p, px, now, reason):
         log(f"sell {p} failed: {e}")
         return False
     st["open"].pop(p)
+    manual = t.get("manual", False)
     pnl = got - t["cost"]
-    st["cash"] += got
     pct = pnl / t["cost"] * 100
     mins = (now - t["t"]) / 60
-    st["closed"].append({"t": now, "pnl": pnl, "pct": pct})
+    if not manual:
+        st["cash"] += got
+        st["closed"].append({"t": now, "pnl": pnl, "pct": pct})
+    else:
+        st.setdefault("manual_closed", []).append({"t": now, "pnl": pnl, "pct": pct})
     st["cooldown"][p] = now + COOLDOWN
     record([datetime.fromtimestamp(t["t"], RIYADH).isoformat(timespec="seconds"),
             datetime.fromtimestamp(now, RIYADH).isoformat(timespec="seconds"), p,
             f"{t['entry']:.8g}", f"{exit_px:.8g}", f"{(t['peak'] / t['entry'] - 1) * 100:.2f}",
-            f"{pnl:.2f}", f"{pct:.2f}", f"{mins:.0f}", reason, "live" if st["live"] else "paper"])
-    took = sweep(st)
+            f"{pnl:.2f}", f"{pct:.2f}", f"{mins:.0f}", reason,
+            "manual" if manual else ("live" if st["live"] else "paper")])
+    took = 0.0 if manual else sweep(st)
     where = "تركته في حسابك برا التداول" if st["live"] else "سحبته برا الصفقات"
-    msg = (f"{'✅' if pnl > 0 else '❌'} {tag(st)} خروج {short(p)} | {pct:+.2f}% ({pnl:+.2f}$)\n"
+    msg = (f"{'✅' if pnl > 0 else '❌'} {tag(st)} خروج {short(p)}{' 📥 (شراءك اليدوي)' if manual else ''} | {pct:+.2f}% ({pnl:+.2f}$)\n"
            f"دخول {t['entry']:.6g} ← خروج {exit_px:.6g} | أعلى نقطة {(t['peak'] / t['entry'] - 1) * 100:+.1f}%\n"
            f"المدة {mins:.0f} دقيقة | السبب: {WHY[reason]}"
            + (f"\n⚠️ {note}" if note else "")
@@ -269,6 +279,8 @@ def manage(ex, st, prices, now):
                 stop = max(stop, t["entry"] * (1 + gain_peak * LOCK_SHARE))
             if px <= stop:
                 close(ex, st, p, px, now, "trail")
+        elif t.get("manual"):                       # owner's buys: only stop-loss and trailing stop
+            continue
         elif now - t["t"] >= FAIL_MINS * 60 and gain < FAIL_MIN_GAIN:
             close(ex, st, p, px, now, "failed")
         elif now - t["t"] >= MAX_HOLD_MINS * 60:
@@ -293,7 +305,7 @@ def scan(ex, st, tickers, now):
     btc = st["seen"].get("BTC/USDT")
     old_btc = price_ago(btc, now, 3600) if btc else None
     btc_1h = tickers["BTC/USDT"]["last"] / old_btc - 1 if old_btc else 0
-    if btc_1h < BTC_DUMP or len(st["open"]) >= MAX_OPEN:
+    if btc_1h < BTC_DUMP or len(bot_open(st)) >= MAX_OPEN:
         return
     cands = []
     for sym, t in pairs.items():
@@ -306,10 +318,10 @@ def scan(ex, st, tickers, now):
         if MOVE_15M <= move < MAX_MOVE_15M and (t.get("percentage") or 0) / 100 < MAX_24H:
             cands.append((move, sym, t))
     for move, sym, t in sorted(cands, reverse=True)[:5]:
-        if len(st["open"]) >= MAX_OPEN:
+        if len(bot_open(st)) >= MAX_OPEN:
             break
         small = short(sym) not in LARGE
-        if small and sum(1 for p in st["open"] if short(p) not in LARGE) >= MAX_SMALL_OPEN:
+        if small and sum(1 for p in bot_open(st) if short(p) not in LARGE) >= MAX_SMALL_OPEN:
             continue
         try:
             ok = confirm(ex, sym, t)
@@ -343,6 +355,82 @@ def scan(ex, st, tickers, now):
         tg(msg)
 
 
+ADOPT_SECS = 60
+ADOPT_MIN_USD = 5.0                      # ignore dust
+SKIP_ASSETS = {"USDT", "BNB"} | STABLE    # BNB is often kept for fees
+
+
+def _totals(ex):
+    return {a: float(v) for a, v in (ex.fetch_balance().get("total") or {}).items() if v}
+
+
+def adopt_baseline(ex, st):
+    """Snapshot what the owner already holds; these coins are never touched."""
+    tot = _totals(ex)
+    for p, t in st["open"].items():
+        a = short(p)
+        tot[a] = max(0.0, tot.get(a, 0.0) - t["qty"])
+    st["baseline"] = tot
+    log(f"adopt baseline: {', '.join(f'{a}={q:g}' for a, q in tot.items() if a not in SKIP_ASSETS) or 'none'}")
+
+
+def _buy_price(ex, sym, qty, fallback):
+    """Average price of the most recent buys that add up to qty."""
+    try:
+        trades = ex.fetch_my_trades(sym, since=int((time.time() - 7 * 86400) * 1000), limit=100)
+    except Exception:
+        return fallback
+    need, cost, got = qty, 0.0, 0.0
+    for tr in sorted(trades, key=lambda x: x["timestamp"], reverse=True):
+        if tr["side"] != "buy" or need <= 0:
+            continue
+        q = min(tr["amount"], need)
+        cost += q * tr["price"]
+        got += q
+        need -= q
+    return cost / got if got else fallback
+
+
+def adopt(ex, st, prices, now):
+    """Pick up coins the owner bought by hand on Spot after this feature was switched on."""
+    if "baseline" not in st:
+        adopt_baseline(ex, st)
+        return
+    tot = _totals(ex)
+    base = st["baseline"]
+    for a in list(base):                                   # owner sold old coins -> shrink baseline
+        if tot.get(a, 0.0) < base[a]:
+            base[a] = tot.get(a, 0.0)
+    for a, held in tot.items():
+        if a in SKIP_ASSETS:
+            continue
+        sym = f"{a}/USDT"
+        if sym not in ex.markets:
+            continue
+        tracked = st["open"][sym]["qty"] if sym in st["open"] else 0.0
+        extra = held - base.get(a, 0.0) - tracked
+        px = prices.get(sym)
+        if px is None or extra * px < ADOPT_MIN_USD:
+            continue
+        entry = _buy_price(ex, sym, extra, px)
+        if sym in st["open"]:                              # owner added to a coin already tracked
+            t = st["open"][sym]
+            t["entry"] = (t["entry"] * t["qty"] + entry * extra) / (t["qty"] + extra)
+            t["qty"] += extra
+            t["cost"] += entry * extra
+            t["peak"] = max(t["peak"], px)
+            what = "زدت على"
+        else:
+            st["open"][sym] = {"t": now, "entry": entry, "qty": extra, "cost": entry * extra,
+                               "peak": max(entry, px), "manual": True}
+            what = "استلمت"
+        msg = (f"📥 {tag(st)} {what} {a} اللي اشتريتها بيدك: {extra:g} بسعر {entry:.6g} "
+               f"(قيمتها {extra * px:.2f}$، الحين {(px / entry - 1) * 100:+.2f}%)\n"
+               f"بتابعها بنفس قواعد البوت: وقف -4%، ووقف متحرك بعد +4%. مبلغها برا الـ {st['start_capital']:.0f}$.")
+        log(msg.replace("\n", " | "))
+        tg(msg)
+
+
 def hourly(st, prices, now):
     E = equity(st, prices)
     pnl = E - st["hour_eq"]
@@ -351,7 +439,7 @@ def hourly(st, prices, now):
     hour_trades = [c for c in st["closed"] if c["t"] >= st["hour_t"]]
     allc = st["closed"]
     wins = sum(1 for c in allc if c["pnl"] > 0)
-    opened = ", ".join(f"{short(p)} {(prices.get(p, t['entry']) / t['entry'] - 1) * 100:+.1f}%"
+    opened = ", ".join(f"{short(p)}{'📥' if t.get('manual') else ''} {(prices.get(p, t['entry']) / t['entry'] - 1) * 100:+.1f}%"
                        for p, t in st["open"].items()) or "ما فيه"
     line = (f"🧠 صياد الانفجارات {tag(st)} - الساعة {st['hours']}\n"
             f"صفقات مقفولة: {len(hour_trades)} | النتيجة: {pnl:+.2f}$\n"
@@ -434,7 +522,15 @@ def main():
             log(f"live balance check failed: {e}")
             tg(f"❌ {tag(st)} ما قدرت أتصل بحسابك في Binance: {str(e)[:200]}\n"
                f"تأكد من المفتاح وإن فيه صلاحية Spot Trading.")
-    prices, last_scan = {}, 0.0
+    if st["live"] and "baseline" not in st:
+        try:
+            adopt_baseline(ex, st)
+            save(st)
+            tg(f"📥 {tag(st)} فعّلت متابعة شراءك اليدوي: أي عملة تشتريها من Spot من الحين، أستلمها "
+               f"وأتابعها بنفس قواعد البوت. عملاتك الموجودة الحين ما ألمسها.")
+        except Exception as e:
+            log(f"adopt baseline failed: {e}")
+    prices, last_scan, last_adopt = {}, 0.0, 0.0
     while True:
         try:
             now = time.time()
@@ -448,6 +544,13 @@ def main():
                 tk = ex.fetch_tickers(list(st["open"]))
                 prices.update({s: t["last"] for s, t in tk.items() if t.get("last")})
                 manage(ex, st, prices, now)
+
+            if st["live"] and now - last_adopt >= ADOPT_SECS and prices:
+                last_adopt = now
+                try:
+                    adopt(ex, st, prices, now)
+                except Exception as e:
+                    log(f"adopt check failed: {e}")
 
             if now - st["hour_t"] >= 3600:
                 hourly(st, prices, now)
