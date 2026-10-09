@@ -34,7 +34,7 @@ from datetime import datetime, timezone, timedelta
 import ccxt
 import requests
 
-from chart import STABLE
+from chart import STABLE, read_chart
 
 
 DATA = os.getenv("DATA_DIR", "/data")
@@ -391,11 +391,29 @@ def _buy_price(ex, sym, qty, fallback):
     return cost / got if got else fallback
 
 
+VIEW_EVERY = 6 * 3600                  # opinion on the owner's coins every 6 hours
+
+
+def view(ex, sym, buy_px, px):
+    """Short opinion on a coin from its 15m chart."""
+    try:
+        c = read_chart(ex, sym)
+    except Exception:
+        return "ما قدرت أقرأ التشارت الحين"
+    trend = {"up": "📈 صاعد", "down": "📉 هابط", "side": "↔️ عرضي"}[c["regime"]]
+    rsi = c["rsi"]
+    heat = " | متشبعة شراء (ممكن ترتاح)" if rsi >= 70 else (" | متشبعة بيع (ممكن ترتد)" if rsi <= 30 else "")
+    advice = {"up": "خلها، والوقف المتحرك يحمي الربح",
+              "down": "انتبه: الاتجاه نازل، لو كسرت الوقف أبيعها",
+              "side": "ما فيه اتجاه واضح، أنتظر"}[c["regime"]]
+    return (f"{trend} (4 ساعات {c['chg4h'] * 100:+.1f}%، RSI {rsi:.0f}){heat}\n"
+            f"ربحك من سعر شرائك: {(px / buy_px - 1) * 100:+.2f}% | رأيي: {advice}")
+
+
 def adopt(ex, st, prices, now):
-    """Pick up coins the owner bought by hand on Spot after this feature was switched on."""
+    """Manage every Spot coin worth >= 5 USDT that the bot didn't buy itself (old or new)."""
     if "baseline" not in st:
         adopt_baseline(ex, st)
-        return
     tot = _totals(ex)
     base = st["baseline"]
     for a in list(base):                                   # owner sold old coins -> shrink baseline
@@ -407,28 +425,44 @@ def adopt(ex, st, prices, now):
         sym = f"{a}/USDT"
         if sym not in ex.markets:
             continue
-        tracked = st["open"][sym]["qty"] if sym in st["open"] else 0.0
-        extra = held - base.get(a, 0.0) - tracked
         px = prices.get(sym)
+        tracked = st["open"][sym]["qty"] if sym in st["open"] else 0.0
+        extra = held - tracked
         if px is None or extra * px < ADOPT_MIN_USD:
             continue
-        entry = _buy_price(ex, sym, extra, px)
+        old_q = min(extra, base.get(a, 0.0))               # held before: stop counted from today's price
+        new_q = extra - old_q                              # bought now: stop counted from the buy price
+        buy_px = _buy_price(ex, sym, extra, px)
+        new_px = _buy_price(ex, sym, new_q, px) if new_q > 0 else px
+        entry = (old_q * px + new_q * new_px) / extra
+        base[a] = 0.0
         if sym in st["open"]:                              # owner added to a coin already tracked
             t = st["open"][sym]
             t["entry"] = (t["entry"] * t["qty"] + entry * extra) / (t["qty"] + extra)
+            t["buy_px"] = (t.get("buy_px", t["entry"]) * t["qty"] + buy_px * extra) / (t["qty"] + extra)
             t["qty"] += extra
             t["cost"] += entry * extra
             t["peak"] = max(t["peak"], px)
             what = "زدت على"
         else:
             st["open"][sym] = {"t": now, "entry": entry, "qty": extra, "cost": entry * extra,
-                               "peak": max(entry, px), "manual": True}
+                               "peak": max(entry, px), "manual": True, "buy_px": buy_px, "view_t": now}
             what = "استلمت"
-        msg = (f"📥 {tag(st)} {what} {a} اللي اشتريتها بيدك: {extra:g} بسعر {entry:.6g} "
-               f"(قيمتها {extra * px:.2f}$، الحين {(px / entry - 1) * 100:+.2f}%)\n"
-               f"بتابعها بنفس قواعد البوت: وقف -4%، ووقف متحرك بعد +4%. مبلغها برا الـ {st['start_capital']:.0f}$.")
+        t = st["open"][sym]
+        note = ("\nكانت عندك من قبل، فوقف الخسارة محسوب من سعر اليوم مو من سعر شرائك."
+                if old_q > 0 else "")
+        msg = (f"📥 {tag(st)} {what} {a}: {extra:g} (قيمتها {extra * px:.2f}$)\n"
+               f"{view(ex, sym, t['buy_px'], px)}\n"
+               f"أتابعها: وقف -4% من {t['entry']:.6g}، ووقف متحرك بعد +4%. مبلغها برا الـ {st['start_capital']:.0f}$."
+               + note)
         log(msg.replace("\n", " | "))
         tg(msg)
+    for sym, t in st["open"].items():                      # periodic opinion on the owner's coins
+        if t.get("manual") and now - t.get("view_t", 0) >= VIEW_EVERY and sym in prices:
+            t["view_t"] = now
+            tg(f"👀 {tag(st)} نظرتي على {short(sym)} (شراءك اليدوي)\n"
+               f"{view(ex, sym, t.get('buy_px', t['entry']), prices[sym])}\n"
+               f"الحين {(prices[sym] / t['entry'] - 1) * 100:+.2f}% من نقطة المتابعة")
 
 
 def hourly(st, prices, now):
@@ -526,8 +560,8 @@ def main():
         try:
             adopt_baseline(ex, st)
             save(st)
-            tg(f"📥 {tag(st)} فعّلت متابعة شراءك اليدوي: أي عملة تشتريها من Spot من الحين، أستلمها "
-               f"وأتابعها بنفس قواعد البوت. عملاتك الموجودة الحين ما ألمسها.")
+            tg(f"📥 {tag(st)} فعّلت متابعة عملاتك: أي عملة في Spot قيمتها 5$ أو أكثر (قديمة أو جديدة) "
+               f"أستلمها وأتابعها بنفس قواعد البوت، وأعطيك نظرتي عليها كل 6 ساعات.")
         except Exception as e:
             log(f"adopt baseline failed: {e}")
     prices, last_scan, last_adopt = {}, 0.0, 0.0
