@@ -27,7 +27,7 @@ Railway variables:
   PUMP_LIVE=on + BINANCE_KEY + BINANCE_SECRET -> real orders (spot only)
   PUMP_CAPITAL (50), PUMP_TG_HOURLY (on), GRID=off disables the bot
 """
-import csv, os, pickle, time, traceback
+import csv, os, pickle, re, time, traceback
 from collections import deque
 from datetime import datetime, timezone, timedelta
 
@@ -355,6 +355,127 @@ def scan(ex, st, tickers, now):
         tg(msg)
 
 
+# ---------------- alerts from the owner's momentum bot (via a Telegram channel or forwards) ----------------
+ALERT_SECS = 5
+ALERT_MIN_MOVE_15M = 0.01        # the move must still be alive: at least +1% over the last 15 minutes
+ALERT_VOL_SPIKE = 2.0            # and the last 5m volume at least 2x the 2-hour average
+SYM_PATTERNS = [r"trade/([A-Z0-9]{2,15})_USDT", r"\b([A-Z0-9]{2,15})_USDT\b", r"\b([A-Z0-9]{2,15})/USDT\b",
+                r"(?:همسة مبكّرة|همسة مبكرة|زخم|إشارة)\s*:\s*([A-Z0-9]{2,15})\b"]
+
+
+def alert_symbols(text):
+    out = []
+    for pat in SYM_PATTERNS:
+        for m in re.findall(pat, text or ""):
+            if m not in out:
+                out.append(m)
+    return out
+
+
+def tg_updates(st):
+    """New messages for our bot: channel posts (bot is admin) and the owner's own/forwarded messages."""
+    if not TG_TOKEN:
+        return []
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
+                         params={"offset": st.get("tg_offset", 0), "timeout": 0,
+                                 "allowed_updates": '["message","channel_post"]'}, timeout=10).json()
+    except Exception:
+        return []
+    texts = []
+    for u in r.get("result", []):
+        st["tg_offset"] = u["update_id"] + 1
+        m = u.get("channel_post") or u.get("message") or {}
+        chat = m.get("chat", {})
+        if u.get("message") and str(chat.get("id")) != str(TG_CHAT):
+            continue                                   # only the owner can talk to the bot
+        text = m.get("text") or m.get("caption") or ""
+        if text:
+            texts.append(text)
+    return texts
+
+
+def evaluate_alert(ex, st, sym, now):
+    """Check an alerted coin with the bot's own rules. Returns (ok, reasons, details)."""
+    no = []
+    if sym not in ex.markets:
+        return False, [f"{short(sym)} ما لها زوج USDT في Spot (ممكن تكون Alpha)"], {}
+    if st.get("paused"):
+        no.append("البوت موقف الدخول (رصيد التداول نزل لـ 60%)")
+    today = datetime.now(RIYADH).date()
+    day_pnl = sum(c["pnl"] for c in st["closed"] if datetime.fromtimestamp(c["t"], RIYADH).date() == today)
+    if day_pnl <= -DAY_LOSS_LIMIT:
+        no.append(f"وصلنا حد الخسارة اليومي ({day_pnl:.2f}$)")
+    if sym in st["open"]:
+        no.append("عندي صفقة مفتوحة فيها أصلاً")
+    if st["cooldown"].get(sym, 0) > now:
+        no.append("طلعت منها قبل أقل من 6 ساعات")
+    if len(bot_open(st)) >= MAX_OPEN:
+        no.append(f"عندي {MAX_OPEN} صفقات مفتوحة (الحد)")
+    small = short(sym) not in LARGE
+    if small and sum(1 for p in bot_open(st) if short(p) not in LARGE) >= MAX_SMALL_OPEN:
+        no.append("عندي عملتين صغيرتين مفتوحة (الحد)")
+    t = ex.fetch_ticker(sym)
+    ch24 = (t.get("percentage") or 0) / 100
+    vol24 = t.get("quoteVolume") or 0
+    if ch24 >= MAX_24H:
+        no.append(f"متأخرة: طالعة {ch24 * 100:+.1f}% في 24 ساعة (الحد {MAX_24H * 100:.0f}%)")
+    if vol24 < MIN_VOL_24H:
+        no.append(f"سيولتها ضعيفة: {vol24 / 1e6:.1f} مليون$ باليوم (الحد {MIN_VOL_24H / 1e6:.0f})")
+    c = ex.fetch_ohlcv(sym, "5m", limit=30)
+    move = c[-1][4] / c[-4][1] - 1 if len(c) >= 4 else 0
+    prev = c[-25:-1]
+    spike = c[-1][5] / (sum(x[5] for x in prev) / len(prev)) if prev and sum(x[5] for x in prev) else 0
+    if move >= MAX_MOVE_15M:
+        no.append(f"متأخرة: طالعة {move * 100:+.1f}% في 15 دقيقة")
+    elif move < ALERT_MIN_MOVE_15M:
+        no.append(f"الزخم خفّ: {move * 100:+.1f}% بس في آخر 15 دقيقة")
+    if spike < ALERT_VOL_SPIKE:
+        no.append(f"الحجم ضعيف: {spike:.1f}× المعتاد (أحتاج {ALERT_VOL_SPIKE:.0f}×)")
+    ob = ex.fetch_order_book(sym, limit=5)
+    spread = (ob["asks"][0][0] - ob["bids"][0][0]) / ((ob["asks"][0][0] + ob["bids"][0][0]) / 2)
+    if spread > MAX_SPREAD:
+        no.append(f"السبريد واسع: {spread * 100:.2f}%")
+    btc = ex.fetch_ohlcv("BTC/USDT", "5m", limit=13)
+    btc_1h = btc[-1][4] / btc[0][1] - 1 if len(btc) >= 2 else 0
+    if btc_1h < BTC_DUMP:
+        no.append(f"البتكوين نازل {btc_1h * 100:.1f}% في ساعة")
+    return not no, no, {"t": t, "move": move, "spike": spike, "spread": spread, "ch24": ch24, "small": small}
+
+
+def handle_alerts(ex, st, now):
+    for text in tg_updates(st):
+        for base in alert_symbols(text)[:3]:
+            sym = f"{base}/USDT"
+            try:
+                ok, reasons, d = evaluate_alert(ex, st, sym, now)
+            except Exception as e:
+                tg(f"⚠️ {tag(st)} وصلني تنبيه {base} بس ما قدرت أفحصه: {str(e)[:120]}")
+                continue
+            if not ok:
+                msg = f"🔎 {tag(st)} تنبيه {base}: ❌ ما دخلت\n" + "\n".join(f"• {r}" for r in reasons)
+                log(msg.replace("\n", " | "))
+                tg(msg)
+                continue
+            stake = min(st["cash"], STAKE_SMALL if d["small"] else STAKE_LARGE)
+            if stake < MIN_STAKE:
+                tg(f"🔎 {tag(st)} تنبيه {base}: ❌ ما دخلت\n• رصيد التداول المتاح {st['cash']:.2f}$ ما يكفي")
+                continue
+            try:
+                entry, qty, spent = buy(ex, st, sym, stake, d["t"]["last"])
+            except Exception as e:
+                tg(f"⚠️ {tag(st)} تنبيه {base}: الفحص نجح بس ما قدرت أشتري: {str(e)[:150]}")
+                continue
+            st["cash"] -= spent
+            st["open"][sym] = {"t": now, "entry": entry, "qty": qty, "cost": spent, "peak": entry, "src": "alert"}
+            msg = (f"🔎🚀 {tag(st)} تنبيه {base}: ✅ دخلت بسعر {entry:.6g} | المبلغ {spent:.2f}$\n"
+                   f"15 دقيقة {d['move'] * 100:+.1f}% | الحجم {d['spike']:.1f}× | 24 ساعة {d['ch24'] * 100:+.1f}% | "
+                   f"السبريد {d['spread'] * 100:.2f}%\n"
+                   f"{'🔸 عملة صغيرة' if d['small'] else '🔹 عملة كبيرة'} | أتابعها بنفس قواعد الخروج")
+            log(msg.replace("\n", " | "))
+            tg(msg)
+
+
 ADOPT_SECS = 60
 ADOPT_MIN_USD = 5.0                      # ignore dust
 SKIP_ASSETS = {"USDT", "BNB"} | STABLE    # BNB is often kept for fees
@@ -564,7 +685,7 @@ def main():
                f"أستلمها وأتابعها بنفس قواعد البوت، وأعطيك نظرتي عليها كل 6 ساعات.")
         except Exception as e:
             log(f"adopt baseline failed: {e}")
-    prices, last_scan, last_adopt = {}, 0.0, 0.0
+    prices, last_scan, last_adopt, last_alert = {}, 0.0, 0.0, 0.0
     while True:
         try:
             now = time.time()
@@ -578,6 +699,13 @@ def main():
                 tk = ex.fetch_tickers(list(st["open"]))
                 prices.update({s: t["last"] for s, t in tk.items() if t.get("last")})
                 manage(ex, st, prices, now)
+
+            if now - last_alert >= ALERT_SECS:
+                last_alert = now
+                try:
+                    handle_alerts(ex, st, now)
+                except Exception as e:
+                    log(f"alert check failed: {e}")
 
             if st["live"] and now - last_adopt >= ADOPT_SECS and prices:
                 last_adopt = now
